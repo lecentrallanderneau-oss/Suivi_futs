@@ -1,475 +1,247 @@
-import os
-from datetime import datetime, date, time
-from flask import Flask, render_template, request, redirect, url_for, flash, session, Response
+# utils.py
+from __future__ import annotations
+from datetime import datetime
+from typing import Dict, List, Tuple
+
 from sqlalchemy import func
 
-from models import db, Client, Product, Variant, Movement, ReorderRule
-from seed import seed_if_empty
-import utils as U
+from models import db, Client, Product, Variant, Movement, ReorderRule, Inventory
 
 
-def create_app():
-    app = Flask(__name__)
-    app.secret_key = os.environ.get("SECRET_KEY", "dev")
-    app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", "sqlite:///data.db")
-    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-    db.init_app(app)
+# -------------------- Outils généraux --------------------
 
-    with app.app_context():
-        db.create_all()
-        seed_if_empty()
+def now_utc() -> datetime:
+    """Retourne un datetime naïf en UTC (cohérent avec le reste de l'app)."""
+    return datetime.utcnow()
 
-    # ----------------- Healthcheck -----------------
-    @app.route("/healthz", methods=["GET", "HEAD"])
-    def healthz():
-        return Response("ok", status=200, mimetype="text/plain")
 
-    # ----------------- Filtres Jinja -----------------
-    @app.template_filter("dt")
-    def fmt_dt(value):
-        if not value:
-            return ""
-        try:
-            return value.strftime("%d/%m/%Y")
-        except Exception:
-            return str(value)
+def _to_int(x, default=0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
 
-    @app.template_filter("eur")
-    def fmt_eur(v):
-        if v is None:
-            return "-"
-        return f"{v:,.2f} €".replace(",", " ").replace(".", ",")
 
-    @app.template_filter("signed_eur")
-    def fmt_signed_eur(v):
-        if v is None:
-            return "-"
-        s = "+" if v >= 0 else "−"
-        return f"{s}{abs(v):,.2f} €".replace(",", " ").replace(".", ",")
+def _to_float(x, default=0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
 
-    # ----------------- Helper : fûts “ouverts” par variante chez un client -----------------
-    def _open_kegs_by_variant(client_id: int):
-        out_rows = dict(
-            db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
-            .filter(Movement.client_id == client_id, Movement.type == "OUT")
-            .group_by(Movement.variant_id)
-            .all()
-        )
-        back_rows = dict(
-            db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
-            .filter(Movement.client_id == client_id, Movement.type.in_(["IN", "DEFECT", "FULL"]))
-            .group_by(Movement.variant_id)
-            .all()
-        )
-        all_vids = set(out_rows) | set(back_rows)
-        return {vid: int(out_rows.get(vid, 0)) - int(back_rows.get(vid, 0)) for vid in all_vids}
 
-    # ----------------- Pages -----------------
-    @app.route("/")
-    def index():
-        clients = Client.query.order_by(Client.name.asc()).all()
-        cards = [U.summarize_client_for_index(c) for c in clients]
-        totals = U.summarize_totals(cards)
-        alerts = U.compute_reorder_alerts()
-        return render_template("index.html", cards=cards, totals=totals, alerts=alerts)
+def _is_ecocup_name(name: str) -> bool:
+    n = (name or "").lower()
+    return ("ecocup" in n) or ("gobelet" in n)
 
-    @app.route("/clients")
-    def clients():
-        clients = Client.query.order_by(Client.name.asc()).all()
-        return render_template("clients.html", clients=clients)
 
-    @app.route("/client/new", methods=["GET", "POST"])
-    def client_new():
-        if request.method == "POST":
-            name = request.form.get("name", "").strip()
-            if not name:
-                flash("Nom obligatoire.", "warning")
-                return render_template("client_form.html", client=None, is_edit=False)
-            c = Client(name=name)
-            db.session.add(c)
-            db.session.commit()
-            flash("Client créé.", "success")
-            return redirect(url_for("clients"))
-        return render_template("client_form.html", client=None, is_edit=False)
+def _is_equipment_only_name(name: str) -> bool:
+    n = (name or "").lower()
+    # On considère "Matériel seul" comme l'article générique d'équipement
+    return ("matériel" in n or "materiel" in n) and ("seul" in n)
 
-    @app.route("/client/<int:client_id>/edit", methods=["GET", "POST"])
-    def client_edit(client_id):
-        c = Client.query.get_or_404(client_id)
-        if request.method == "POST":
-            name = request.form.get("name", "").strip()
-            if not name:
-                flash("Nom obligatoire.", "warning")
-                return render_template("client_form.html", client=c, is_edit=True)
-            c.name = name
-            db.session.commit()
-            flash("Client modifié.", "success")
-            return redirect(url_for("clients"))
-        return render_template("client_form.html", client=c, is_edit=True)
 
-    @app.route("/client/<int:client_id>")
-    def client_detail(client_id):
-        c = Client.query.get_or_404(client_id)
-        view = U.summarize_client_detail(c)
+def default_deposit_for_product(product) -> float:
+    """
+    Consigne par défaut :
+    - Ecocup / gobelets -> 1.00 €
+    - Autres (fûts, etc.) -> 30.00 €
+    """
+    name = (getattr(product, "name", "") or "").lower()
+    if "ecocup" in name or "gobelet" in name:
+        return 1.0
+    return 30.0
 
-        movements = (
-            db.session.query(Movement, Variant, Product)
-            .join(Variant, Movement.variant_id == Variant.id)
-            .join(Product, Variant.product_id == Product.id)
-            .filter(Movement.client_id == client_id)
-            .order_by(Movement.created_at.desc(), Movement.id.desc())
-            .all()
-        )
 
-        return render_template(
-            "client_detail.html",
-            client=c,
-            view=view,
-            movements=movements,
-            beer_billed_cum=view["beer_eur"],
-            deposit_in_play=view["deposit_eur"],
-            equipment_totals=view["equipment"],
-            liters_out_cum=view.get("liters_out_cum", 0.0),
-            litres_out_cum=view.get("liters_out_cum", 0.0),
-        )
+def get_or_create_inventory(variant_id: int) -> Inventory:
+    """Récupère (ou crée) une ligne d'inventaire pour la variante donnée."""
+    inv = Inventory.query.filter_by(variant_id=variant_id).first()
+    if not inv:
+        inv = Inventory(variant_id=variant_id, qty=0)
+        db.session.add(inv)
+        # ATTENTION : commit géré par l'appelant, pour regrouper les opérations
+    return inv
 
-    @app.route("/catalog")
-    def catalog():
-        # Masquer ecocup lavage/perdu / gobelet lavage/perdu
-        from sqlalchemy import or_
-        bad_patterns = [
-            "%ecocup%lavage%", "%ecocup%perdu%",
-            "%gobelet%lavage%", "%gobelet%perdu%",
-        ]
-        cond_hide = ~or_(*[Product.name.ilike(p) for p in bad_patterns])
 
-        variants = (
-            db.session.query(Variant)
-            .join(Product, Variant.product_id == Product.id)
-            .filter(cond_hide)
-            .order_by(Product.name, Variant.size_l)
-            .all()
-        )
-        return render_template("catalog.html", variants=variants)
+# -------------------- Agrégations client --------------------
 
-    # ------------- Saisie (wizard) -------------
-    @app.route("/movement/new", methods=["GET"])
-    def movement_new():
-        """Redirection pratique; accepte un client_id pour pré-remplir."""
-        client_id = request.args.get("client_id", type=int)
-        if client_id:
-            return redirect(url_for("movement_wizard", step=1, client_id=client_id))
-        return redirect(url_for("movement_wizard", step=1))
+def _movements_joined_for_client(client_id: int):
+    """
+    Retourne tous les mouvements du client avec leurs variantes/produits,
+    triés du plus récent au plus ancien.
+    """
+    rows = (
+        db.session.query(Movement, Variant, Product)
+        .join(Variant, Movement.variant_id == Variant.id)
+        .join(Product, Variant.product_id == Product.id)
+        .filter(Movement.client_id == client_id)
+        .order_by(Movement.created_at.desc(), Movement.id.desc())
+        .all()
+    )
+    return rows
 
-    @app.route("/movement/wizard", methods=["GET", "POST"])
-    def movement_wizard():
-        # État du wizard en session
-        if "wiz" not in session:
-            session["wiz"] = {}
-        wiz = session["wiz"]
 
-        # Pré-remplissage client depuis l’URL ? (ex: depuis une fiche client)
-        pre_client_id = request.args.get("client_id", type=int)
-        if pre_client_id:
-            wiz["client_id"] = pre_client_id
-            session.modified = True
+def _parse_equipment_notes(notes: str) -> Dict[str, int]:
+    """
+    Convertit une chaîne de notes 'tireuse=1;co2=2;comptoir=1;tonnelle=0'
+    en dict de compteurs.
+    """
+    out: Dict[str, int] = {"tireuse": 0, "co2": 0, "comptoir": 0, "tonnelle": 0}
+    if not notes:
+        return out
+    parts = [p.strip() for p in notes.split(";") if p.strip()]
+    for part in parts:
+        if "=" in part:
+            k, v = part.split("=", 1)
+            k = k.strip().lower()
+            if k in out:
+                out[k] += _to_int(v, 0)
+    return out
 
-        # Forcer la remise à zéro du client si demandé
-        if request.args.get("clear_client"):
-            wiz.pop("client_id", None)
-            session.modified = True
 
-        # Étape courante (par défaut 1)
-        try:
-            step = int(request.args.get("step", 1))
-        except Exception:
-            step = 1
+def summarize_client_detail(client: Client) -> Dict:
+    """
+    Calcule les indicateurs utilisés sur la fiche client :
+    - kegs : unités en jeu (hors ecocup & matériel seul)
+    - deposit_eur : consignes en jeu
+    - beer_eur : montant TTC facturé (cumul) pour la bière (hors ecocup / matériel)
+    - liters_out_cum : litres livrés (cumul)
+    - equipment : totaux d'équipement en jeu (via notes OUT/IN)
+    """
+    rows = _movements_joined_for_client(client.id)
 
-        # ---------- ÉTAPE 1 : type + date (et client si pas déjà fixé) ----------
-        if step == 1:
-            if request.method == "POST":
-                # Si le client n'est pas déjà connu (pas depuis fiche client), lire le select
-                if "client_id" not in wiz:
-                    wiz["client_id"] = request.form.get("client_id", type=int)
-                wiz["type"] = request.form.get("type")
-                wiz["date"] = request.form.get("date")  # AAAA-MM-JJ (optionnel)
-                session.modified = True
-                if not wiz.get("client_id") or not wiz.get("type"):
-                    flash("Sélectionne un client et un type de mouvement.", "warning")
-                    prefill_client = Client.query.get(wiz.get("client_id")) if wiz.get("client_id") else None
-                    return render_template(
-                        "movement_wizard.html",
-                        step=1,
-                        clients=Client.query.order_by(Client.name.asc()).all(),
-                        prefill_client=prefill_client,
-                        rows=[],
-                        wiz=wiz,
-                    )
-                return redirect(url_for("movement_wizard", step=2))
-            # GET
-            clients = Client.query.order_by(Client.name.asc()).all()
-            prefill_client = Client.query.get(wiz.get("client_id")) if wiz.get("client_id") else None
-            return render_template("movement_wizard.html", step=1, clients=clients, prefill_client=prefill_client, rows=[], wiz=wiz)
+    kegs_open = 0
+    deposit_eur = 0.0
+    beer_eur = 0.0
+    liters_out_cum = 0.0
+    equipment = {"tireuse": 0, "co2": 0, "comptoir": 0, "tonnelle": 0}
 
-        # ---------- ÉTAPE 2 : choix des produits/variantes ----------
-        if step == 2:
-            if request.method == "POST":
-                vids = request.form.getlist("variant_id") or request.form.getlist("variant_ids")
-                if not vids:
-                    flash("Sélectionne au moins un produit.", "warning")
-                    return redirect(url_for("movement_wizard", step=2))
-                try:
-                    wiz["variant_ids"] = [int(v) for v in vids]
-                except Exception:
-                    wiz["variant_ids"] = []
-                session.modified = True
-                return redirect(url_for("movement_wizard", step=3))
+    for m, v, p in rows:
+        qty = _to_int(m.qty, 0)
+        pname = (p.name if p else "") or ""
+        is_cup = _is_ecocup_name(pname)
+        is_equipment_only = _is_equipment_only_name(pname)
+        unit_price = m.unit_price_ttc if (m.unit_price_ttc is not None) else (v.price_ttc if v and v.price_ttc is not None else None)
+        deposit = m.deposit_per_keg if (m.deposit_per_keg is not None) else default_deposit_for_product(p)
 
-            # GET : liste de variantes (en masquant ecocup lavage/perdu)
-            clients = Client.query.order_by(Client.name.asc()).all()
-            from sqlalchemy import or_
-            bad_patterns = [
-                "%ecocup%lavage%", "%ecocup%perdu%",
-                "%gobelet%lavage%", "%gobelet%perdu%",
-            ]
-            cond_hide = ~or_(*[Product.name.ilike(p) for p in bad_patterns])
+        # Débits/Crédits consigne
+        if m.type == "OUT":
+            deposit_eur += _to_float(deposit) * qty
+        elif m.type in ("IN", "DEFECT", "FULL"):
+            deposit_eur -= _to_float(deposit) * qty
 
-            base_q = (
-                db.session.query(Variant, Product)
-                .join(Product, Variant.product_id == Product.id)
-                .filter(cond_hide)
-                .order_by(Product.name, Variant.size_l)
-            )
-            if wiz.get("type") == "IN" and wiz.get("client_id"):
-                open_map = _open_kegs_by_variant(wiz["client_id"])
-                allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
-
-                equip_ids = set(
-                    vid for (vid,) in (
-                        db.session.query(Variant.id)
-                        .join(Product, Variant.product_id == Product.id)
-                        .filter(
-                            (
-                                Product.name.ilike("%matériel%seul%")
-                                | Product.name.ilike("%materiel%seul%")
-                                | Product.name.ilike("%Matériel seul%")
-                                | Product.name.ilike("%Materiel seul%")
-                            )
-                        )
-                        .all()
-                    )
-                )
-
-                final_ids = list(allowed_ids | equip_ids)
-                if final_ids:
-                    base_q = base_q.filter(Variant.id.in_(final_ids))
-
-            rows = base_q.all()
-            prefill_client = Client.query.get(wiz.get("client_id")) if wiz.get("client_id") else None
-            return render_template("movement_wizard.html", step=2, clients=clients, rows=rows, wiz=wiz, prefill_client=prefill_client)
-
-        # ---------- ÉTAPE 3 : saut direct vers 4 ----------
-        if step == 3:
-            return redirect(url_for("movement_wizard", step=4))
-
-        # ---------- ÉTAPE 4 : saisie quantités/prix/consignes + enregistrement ----------
-        if step == 4:
-            if request.method == "POST":
-                if (wiz.get("client_id") is None) or (wiz.get("type") is None):
-                    flash("Informations incomplètes.", "warning")
-                    return redirect(url_for("movement_wizard", step=1))
-
-                # Date finale
-                if wiz.get("date"):
-                    try:
-                        y, m_, d2 = [int(x) for x in wiz["date"].split("-")]
-                        created_at = datetime.combine(date(y, m_, d2), time(hour=12))
-                    except Exception:
-                        created_at = U.now_utc()
-                else:
-                    created_at = U.now_utc()
-
-                variant_ids = request.form.getlist("variant_id")
-                qtys = request.form.getlist("qty")
-                unit_prices = request.form.getlist("unit_price_ttc")
-                deposits = request.form.getlist("deposit_per_keg")
-                notes = request.form.get("notes") or None
-
-                # Matériel prêté/repris → notes
-                t = request.form.get("eq_tireuse", type=int)
-                c2 = request.form.get("eq_co2", type=int)
-                cpt = request.form.get("eq_comptoir", type=int)
-                ton = request.form.get("eq_tonnelle", type=int)
-                equip_parts = []
-                if t:   equip_parts.append(f"tireuse={t}")
-                if c2:  equip_parts.append(f"co2={c2}")
-                if cpt: equip_parts.append(f"comptoir={cpt}")
-                if ton: equip_parts.append(f"tonnelle={ton}")
-                notes = (";".join(equip_parts) + (";" + notes if notes else "")) or None
-
-                client_id = int(wiz["client_id"])
-                mtype = wiz["type"]
-
-                violations = []
-                open_map = _open_kegs_by_variant(client_id) if mtype == "IN" else {}
-
-                for i, vid in enumerate(variant_ids):
-                    try:
-                        vid_int = int(vid)
-                    except Exception:
-                        continue
-
-                    try:
-                        qty_int = int(qtys[i])
-                    except Exception:
-                        qty_int = 0
-
-                    up = None
-                    if i < len(unit_prices) and unit_prices[i] not in ("", None):
-                        try:
-                            up = float(unit_prices[i])
-                        except Exception:
-                            up = None
-
-                    dep = None
-                    if i < len(deposits) and deposits[i] not in ("", None):
-                        try:
-                            dep = float(deposits[i])
-                        except Exception:
-                            dep = None
-
-                    v = Variant.query.get(vid_int)
-                    if not v:
-                        continue
-
-                    pname = (v.product.name if v and v.product else "") or ""
-                    is_equipment_only = "matériel" in pname.lower() and "seul" in pname.lower()
-                    if is_equipment_only:
-                        qty_int = 0
-                        up = 0.0
-                        dep = 0.0
-                    else:
-                        if up is None and (v.price_ttc is not None):
-                            up = v.price_ttc
-                        if dep is None:
-                            # Ecocup = 1 €, sinon 30 €
-                            dep = U.default_deposit_for_product(v.product)
-
-                        if mtype == "IN":
-                            open_q = int(open_map.get(vid_int, 0))
-                            if open_q <= 0 or qty_int > open_q:
-                                label = f"{v.product.name} — {v.size_l} L"
-                                violations.append((label, open_q))
-                                continue
-
-                    mv = Movement(
-                        client_id=client_id,
-                        variant_id=vid_int,
-                        type=mtype,
-                        qty=qty_int,
-                        unit_price_ttc=up,
-                        deposit_per_keg=dep,
-                        notes=notes,
-                        created_at=created_at,
-                    )
-                    db.session.add(mv)
-
-                    # MAJ inventaire bar (OUT / FULL)
-                    inv = U.get_or_create_inventory(vid_int)
-                    if mtype == "OUT":
-                        inv.qty = (inv.qty or 0) - qty_int
-                    elif mtype == "FULL":
-                        inv.qty = (inv.qty or 0) + qty_int
-
-                if violations:
-                    text = "Certains retours dépassent l’enjeu autorisé : " + ", ".join(
-                        f"{lab} (max {q})" for lab, q in violations
-                    )
-                    flash(text, "warning")
-                    return redirect(url_for("movement_wizard", step=2))
-
-                db.session.commit()
-                flash("Saisie enregistrée.", "success")
-                session.pop("wiz", None)
-                return redirect(url_for("client_detail", client_id=client_id))
-
-            # GET -> afficher le formulaire de l’étape 4 (on charge les variantes sélectionnées)
-            selected = []
-            for vid in wiz.get("variant_ids", []):
-                v = Variant.query.get(vid)
-                if v:
-                    selected.append((v, v.product))
-            prefill_client = Client.query.get(wiz.get("client_id")) if wiz.get("client_id") else None
-            return render_template("movement_wizard.html", step=4, wiz=wiz, selected=selected, prefill_client=prefill_client)
-
-    # ---- Suppression mouvement ----
-    @app.route("/movement/<int:movement_id>/confirm-delete", methods=["GET"])
-    def movement_confirm_delete(movement_id):
-        m = Movement.query.get_or_404(movement_id)
-        return render_template("movement_confirm_delete.html", m=m)
-
-    @app.route("/movement/<int:movement_id>/delete", methods=["POST"])
-    def movement_delete(movement_id):
-        m = Movement.query.get_or_404(movement_id)
-        client_id = m.client_id
-
-        # Rétablir l’inventaire
-        if m.qty and m.variant_id:
-            inv = U.get_or_create_inventory(m.variant_id)
+        # Bière facturée et litres sortis (on ignore ecocup et "matériel seul")
+        if not is_cup and not is_equipment_only:
             if m.type == "OUT":
-                inv.qty = (inv.qty or 0) + (m.qty or 0)
-            elif m.type == "FULL":
-                inv.qty = (inv.qty or 0) - (m.qty or 0)
+                if v and v.size_l:
+                    liters_out_cum += _to_float(v.size_l) * qty
+                if unit_price is not None:
+                    beer_eur += _to_float(unit_price) * qty
 
-        db.session.delete(m)
-        db.session.commit()
-        flash("Saisie supprimée.", "success")
-        return redirect(url_for("client_detail", client_id=client_id))
+            # Unités en jeu (kegs)
+            if m.type == "OUT":
+                kegs_open += qty
+            elif m.type in ("IN", "DEFECT", "FULL"):
+                kegs_open -= qty
 
-    # ---- Stock ----
-    @app.route("/stock", methods=["GET", "POST"])
-    def stock():
-        if request.method == "POST":
-            changed = 0
-            for k, v in request.form.items():
-                if k.startswith("qty_"):
-                    vid = int(k.split("_", 1)[1])
-                    inv = U.get_or_create_inventory(vid)
-                    inv.qty = int(v or 0)
-                    changed += 1
-                elif k.startswith("min_"):
-                    vid = int(k.split("_", 1)[1])
-                    rr = ReorderRule.query.filter_by(variant_id=vid).first()
-                    if not rr:
-                        rr = ReorderRule(variant_id=vid, min_qty=int(v or 0))
-                        db.session.add(rr)
-                    else:
-                        rr.min_qty = int(v or 0)
-                    changed += 1
-            db.session.commit()
-            flash(f"Inventaire enregistré ({changed} mise(s) à jour).", "success")
-            return redirect(url_for("stock"))
+        # Équipement en jeu sur base des notes (OUT ajoute, IN retire)
+        if m.notes:
+            parsed = _parse_equipment_notes(m.notes)
+            sign = 1 if m.type == "OUT" else (-1 if m.type in ("IN", "DEFECT", "FULL") else 0)
+            if sign:
+                for k in equipment:
+                    equipment[k] += sign * _to_int(parsed.get(k, 0), 0)
 
-        rows = U.get_stock_items()
-        alerts = U.compute_reorder_alerts()
-        return render_template("stock.html", rows=rows, alerts=alerts)
-
-    @app.route("/product/<int:variant_id>")
-    def product_variant(variant_id):
-        v = Variant.query.get_or_404(variant_id)
-        return render_template("product.html", variant=v, product=v.product)
-
-    @app.errorhandler(404)
-    def not_found(e):
-        return render_template("404.html"), 404
-
-    @app.errorhandler(500)
-    def server_error(e):
-        return render_template("500.html"), 500
-
-    return app
+    return {
+        "kegs": max(kegs_open, 0),
+        "deposit_eur": round(deposit_eur, 2),
+        "beer_eur": round(beer_eur, 2),
+        "liters_out_cum": round(liters_out_cum, 2),
+        "equipment": equipment,
+    }
 
 
-app = create_app()
+def summarize_client_for_index(client: Client) -> Dict:
+    """Résumé compact pour la page d'accueil."""
+    detail = summarize_client_detail(client)
+    return {
+        "id": client.id,
+        "name": client.name,
+        "kegs": detail["kegs"],
+        "deposit_eur": detail["deposit_eur"],
+        "beer_eur": detail["beer_eur"],
+        "liters_out_cum": detail["liters_out_cum"],
+        "equipment": detail["equipment"],
+    }
 
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
+def summarize_totals(cards: List[Dict]) -> Dict:
+    """Totaux agrégés pour l'accueil."""
+    total_clients = len(cards)
+    total_kegs = sum(_to_int(c.get("kegs", 0), 0) for c in cards)
+    total_deposit = sum(_to_float(c.get("deposit_eur", 0.0), 0.0) for c in cards)
+    total_beer = sum(_to_float(c.get("beer_eur", 0.0), 0.0) for c in cards)
+    total_liters = sum(_to_float(c.get("liters_out_cum", 0.0), 0.0) for c in cards)
+    return {
+        "clients": total_clients,
+        "kegs": total_kegs,
+        "deposit_eur": round(total_deposit, 2),
+        "beer_eur": round(total_beer, 2),
+        "liters_out_cum": round(total_liters, 2),
+    }
+
+
+# -------------------- Stock & réassort --------------------
+
+def get_stock_items() -> List[Tuple[Variant, Product, int, int]]:
+    """
+    Retourne les lignes pour l'écran Stock.
+    Format : liste de tuples (Variant, Product, inv_qty, min_qty)
+    - inv_qty : quantité d'inventaire actuelle (bar)
+    - min_qty : seuil mini (règle de réassort)
+    """
+    # Toutes les variantes + produits
+    rows = (
+        db.session.query(Variant, Product)
+        .join(Product, Variant.product_id == Product.id)
+        .order_by(Product.name.asc(), Variant.size_l.asc())
+        .all()
+    )
+
+    out: List[Tuple[Variant, Product, int, int]] = []
+    for v, p in rows:
+        inv = Inventory.query.filter_by(variant_id=v.id).first()
+        rr = ReorderRule.query.filter_by(variant_id=v.id).first()
+        inv_qty = _to_int(inv.qty if inv and inv.qty is not None else 0, 0)
+        min_qty = _to_int(rr.min_qty if rr and rr.min_qty is not None else 0, 0)
+        out.append((v, p, inv_qty, min_qty))
+    return out
+
+
+def compute_reorder_alerts() -> List[Dict]:
+    """
+    Construit la liste des alertes de réassort :
+    [{ 'variant_id': ..., 'product': 'Nom', 'size_l': 30.0, 'inv_qty': 1, 'min_qty': 3, 'missing': 2 }, ...]
+    """
+    alerts: List[Dict] = []
+    # On part des règles connues
+    rules = ReorderRule.query.all()
+    for rr in rules:
+        v = Variant.query.get(rr.variant_id)
+        if not v:
+            continue
+        p = Product.query.get(v.product_id)
+        inv = Inventory.query.filter_by(variant_id=v.id).first()
+        inv_qty = _to_int(inv.qty if inv and inv.qty is not None else 0, 0)
+        min_qty = _to_int(rr.min_qty if rr and rr.min_qty is not None else 0, 0)
+        if min_qty > inv_qty:
+            alerts.append({
+                "variant_id": v.id,
+                "product": (p.name if p else f"Var#{v.id}"),
+                "size_l": _to_float(v.size_l, None),
+                "inv_qty": inv_qty,
+                "min_qty": min_qty,
+                "missing": (min_qty - inv_qty),
+            })
+    # Tri : manque le plus élevé d'abord, puis par nom
+    alerts.sort(key=lambda a: (-a["missing"], a["product"]))
+    return alerts
