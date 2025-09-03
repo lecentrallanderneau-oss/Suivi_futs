@@ -1,225 +1,243 @@
-{% extends "base.html" %}
-{% block title %}Saisie{% endblock %}
+@app.route("/movement/wizard", methods=["GET", "POST"])
+def movement_wizard():
+    # État du wizard en session
+    if "wiz" not in session:
+        session["wiz"] = {}
+    wiz = session["wiz"]
 
-{% block content %}
-<h1 class="h3 mb-3">Saisie</h1>
+    # Étape courante (par défaut 1)
+    try:
+        step = int(request.args.get("step", 1))
+    except Exception:
+        step = 1
 
-<div class="card">
-  <div class="card-body">
+    # ---------- ÉTAPE 1 : choix client / type / date ----------
+    if step == 1:
+        if request.method == "POST":
+            wiz["client_id"] = request.form.get("client_id", type=int)
+            wiz["type"] = request.form.get("type")
+            wiz["date"] = request.form.get("date")  # AAAA-MM-JJ (optionnel)
+            session.modified = True
+            # Contrôles légers
+            if not wiz.get("client_id") or not wiz.get("type"):
+                flash("Sélectionne un client et un type de mouvement.", "warning")
+                return render_template("movement_wizard.html", step=1, clients=Client.query.order_by(Client.name.asc()).all(), rows=[], wiz=wiz)
+            return redirect(url_for("movement_wizard", step=2))
+        # GET
+        clients = Client.query.order_by(Client.name.asc()).all()
+        return render_template("movement_wizard.html", step=1, clients=clients, rows=[], wiz=wiz)
 
-    {% if step == 1 %}
-      <!-- ÉTAPE 1 : TYPE + DATE -->
-      <form method="post" class="vstack gap-3">
-        <input type="hidden" name="step" value="1">
+    # ---------- ÉTAPE 2 : choix des produits/variantes ----------
+    if step == 2:
+        if request.method == "POST":
+            # Autoriser 'variant_id' (checkboxes) ou 'variant_ids' (fallback)
+            vids = request.form.getlist("variant_id") or request.form.getlist("variant_ids")
+            if not vids:
+                flash("Sélectionne au moins un produit.", "warning")
+                return redirect(url_for("movement_wizard", step=2))
+            try:
+                wiz["variant_ids"] = [int(v) for v in vids]
+            except Exception:
+                wiz["variant_ids"] = []
+            session.modified = True
+            return redirect(url_for("movement_wizard", step=3))
 
-        <div>
-          <label class="form-label">Type de mouvement</label>
-          <div class="row g-2">
-            <div class="col-6 col-md-3">
-              <div class="form-check">
-                <input class="form-check-input" type="radio" name="type" id="type_out" value="OUT" {{ 'checked' if wiz.get('type') == 'OUT' else '' }} required>
-                <label class="form-check-label" for="type_out">Livraison</label>
-              </div>
-            </div>
-            <div class="col-6 col-md-3">
-              <div class="form-check">
-                <input class="form-check-input" type="radio" name="type" id="type_in" value="IN" {{ 'checked' if wiz.get('type') == 'IN' else '' }} required>
-                <label class="form-check-label" for="type_in">Reprise</label>
-              </div>
-            </div>
-            <div class="col-6 col-md-3">
-              <div class="form-check">
-                <input class="form-check-input" type="radio" name="type" id="type_def" value="DEFECT" {{ 'checked' if wiz.get('type') == 'DEFECT' else '' }} required>
-                <label class="form-check-label" for="type_def">Défectueux</label>
-              </div>
-            </div>
-            <div class="col-6 col-md-3">
-              <div class="form-check">
-                <input class="form-check-input" type="radio" name="type" id="type_full" value="FULL" {{ 'checked' if wiz.get('type') == 'FULL' else '' }} required>
-                <label class="form-check-label" for="type_full">Retour plein</label>
-              </div>
-            </div>
-          </div>
-        </div>
+        # GET : liste de variantes (avec logique IN limitée aux fûts “ouverts” + matériel seul)
+        clients = Client.query.order_by(Client.name.asc()).all()
+        base_q = (
+            db.session.query(Variant, Product)
+            .join(Product, Variant.product_id == Product.id)
+            .order_by(Product.name, Variant.size_l)
+        )
+        if wiz.get("type") == "IN" and wiz.get("client_id"):
+            # Limiter aux variantes réellement en jeu chez ce client + “Matériel seul”
+            def _open_kegs_by_variant(client_id: int):
+                out_rows = dict(
+                    db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
+                    .filter(Movement.client_id == client_id, Movement.type == "OUT")
+                    .group_by(Movement.variant_id)
+                    .all()
+                )
+                back_rows = dict(
+                    db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
+                    .filter(Movement.client_id == client_id, Movement.type.in_(["IN", "DEFECT", "FULL"]))
+                    .group_by(Movement.variant_id)
+                    .all()
+                )
+                all_vids = set(out_rows) | set(back_rows)
+                return {vid: int(out_rows.get(vid, 0)) - int(back_rows.get(vid, 0)) for vid in all_vids}
 
-        <div>
-          <label class="form-label">Date</label>
-          <input type="date" name="date" class="form-control" value="">
-          <div class="form-text">Laissez vide pour utiliser la date de saisie.</div>
-        </div>
+            open_map = _open_kegs_by_variant(wiz["client_id"])
+            allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
 
-        <div class="d-flex gap-2">
-          <button class="btn btn-primary">Continuer</button>
-        </div>
-      </form>
+            equip_ids = set(
+                vid for (vid,) in (
+                    db.session.query(Variant.id)
+                    .join(Product, Variant.product_id == Product.id)
+                    .filter(
+                        (
+                            Product.name.ilike("%matériel%seul%")
+                            | Product.name.ilike("%materiel%seul%")
+                            | Product.name.ilike("%Matériel seul%")
+                            | Product.name.ilike("%Materiel seul%")
+                        )
+                    )
+                    .all()
+                )
+            )
 
-    {% elif step == 2 %}
-      <!-- ÉTAPE 2 : CHOIX CLIENT -->
-      <form method="post" class="vstack gap-3">
-        <input type="hidden" name="step" value="2">
+            final_ids = list(allowed_ids | equip_ids)
+            if final_ids:
+                base_q = base_q.filter(Variant.id.in_(final_ids))
 
-        <div>
-          <label class="form-label">Client</label>
-          <select name="client_id" class="form-select" required>
-            <option value="" disabled {{ 'selected' if not wiz.get('client_id') else '' }}>Sélectionner…</option>
-            {% for c in clients %}
-              <option value="{{ c.id }}" {{ 'selected' if wiz.get('client_id') == c.id else '' }}>{{ c.name }}</option>
-            {% endfor %}
-          </select>
-        </div>
+        rows = base_q.all()
+        return render_template("movement_wizard.html", step=2, clients=clients, rows=rows, wiz=wiz)
 
-        <div class="d-flex gap-2">
-          <a class="btn btn-outline-secondary" href="{{ url_for('movement_wizard', step=1) }}">← Retour</a>
-          <button class="btn btn-primary">Continuer</button>
-        </div>
-      </form>
+    # ---------- ÉTAPE 3 : (si tu as un écran intermédiaire) ----------
+    if step == 3:
+        # Si tu n'as pas de vrai écran à l'étape 3, on passe direct à la 4
+        if request.method == "POST":
+            return redirect(url_for("movement_wizard", step=4))
+        # GET : si tu veux afficher une preview ou des options, sinon on saute à 4
+        return redirect(url_for("movement_wizard", step=4))
 
-    {% elif step == 3 %}
-      <!-- ÉTAPE 3 : RÉCAP -->
-      <div class="mb-3">
-        <div class="row">
-          <div class="col-12 col-md-6">
-            <div><strong>Type :</strong>
-              {{ {'OUT':'Livraison','IN':'Reprise','DEFECT':'Défectueux','FULL':'Retour plein'}[wiz.get('type')] if wiz.get('type') in ['OUT','IN','DEFECT','FULL'] else wiz.get('type') }}
-            </div>
-            <div><strong>Date :</strong> {{ wiz.get('date') or 'aujourd’hui' }}</div>
-          </div>
-          <div class="col-12 col-md-6">
-            <div><strong>Client :</strong> {{ (current_client.name if current_client else '—') }}</div>
-          </div>
-        </div>
-      </div>
+    # ---------- ÉTAPE 4 : saisie quantités/prix/consignes + enregistrement ----------
+    if step == 4:
+        if request.method == "POST":
+            if (wiz.get("client_id") is None) or (wiz.get("type") is None):
+                flash("Informations incomplètes.", "warning")
+                return redirect(url_for("movement_wizard", step=1))
 
-      <form method="post">
-        <input type="hidden" name="step" value="3">
-        <div class="d-flex gap-2">
-          <a class="btn btn-outline-secondary" href="{{ url_for('movement_wizard', step=2) }}">← Retour</a>
-          <button class="btn btn-primary">Passer à la saisie</button>
-        </div>
-      </form>
+            # Date finale
+            if wiz.get("date"):
+                try:
+                    y, m_, d2 = [int(x) for x in wiz["date"].split("-")]
+                    created_at = datetime.combine(date(y, m_, d2), time(hour=12))
+                except Exception:
+                    created_at = U.now_utc()
+            else:
+                created_at = U.now_utc()
 
-    {% elif step == 4 %}
-      <!-- ÉTAPE 4 : SAISIE LIGNES -->
-      <form method="post" id="lines-form" class="vstack gap-3">
-        <input type="hidden" name="step" value="4">
-        <input type="hidden" name="action" value="save">
+            variant_ids = request.form.getlist("variant_id")
+            qtys = request.form.getlist("qty")
+            unit_prices = request.form.getlist("unit_price_ttc")
+            deposits = request.form.getlist("deposit_per_keg")
+            notes = request.form.get("notes") or None
 
-        <div class="table-responsive">
-          <table class="table table-sm align-middle mb-0">
-            <thead>
-              <tr>
-                <th style="min-width: 260px;">Produit</th>
-                <th class="text-end" style="width: 120px;">Qté</th>
-                <th class="text-end" style="width: 140px;">Prix TTC (/fût)</th>
-                <th class="text-end" style="width: 140px;">Consigne (/fût)</th>
-                <th>—</th>
-              </tr>
-            </thead>
-            <tbody id="lines-body">
-              <tr class="line">
-                <td>
-                  <select name="variant_id" class="form-select variant-select" required>
-                    <option value="" disabled selected>Choisir…</option>
-                    {% for v in variants %}
-                      <option value="{{ v.id }}">{{ v.product.name }} — {{ v.size_l }} L</option>
-                    {% endfor %}
-                  </select>
-                  <div class="form-text">Astuce : si vous choisissez un produit nommé “Matériel seul…”, Qté, Prix et Consigne passeront à 0.</div>
-                </td>
-                <td><input type="number" name="qty" class="form-control text-end qty" min="1" step="1" value="1" required></td>
-                <td><input type="number" name="unit_price_ttc" class="form-control text-end price" step="0.01" placeholder="auto"></td>
-                <td><input type="number" name="deposit_per_keg" class="form-control text-end deposit" step="0.01" value="{{ 30 if wiz.get('type') in ['OUT','IN'] else '' }}" placeholder="30"></td>
-                <td>
-                  <button class="btn btn-sm btn-outline-danger" type="button" onclick="removeLine(this)">Supprimer</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+            # Matériel prêté/repris → notes
+            t = request.form.get("eq_tireuse", type=int)
+            c2 = request.form.get("eq_co2", type=int)
+            cpt = request.form.get("eq_comptoir", type=int)
+            ton = request.form.get("eq_tonnelle", type=int)
+            equip_parts = []
+            if t:   equip_parts.append(f"tireuse={t}")
+            if c2:  equip_parts.append(f"co2={c2}")
+            if cpt: equip_parts.append(f"comptoir={cpt}")
+            if ton: equip_parts.append(f"tonnelle={ton}")
+            notes = (";".join(equip_parts) + (";" + notes if notes else "")) or None
 
-        <!-- Matériel prêté / repris -->
-        <div class="row g-2">
-          <div class="col-6 col-md-3">
-            <label class="form-label">Tireuse</label>
-            <input type="number" name="eq_tireuse" class="form-control" min="0" step="1" value="0">
-          </div>
-          <div class="col-6 col-md-3">
-            <label class="form-label">CO₂</label>
-            <input type="number" name="eq_co2" class="form-control" min="0" step="1" value="0">
-          </div>
-          <div class="col-6 col-md-3">
-            <label class="form-label">Comptoir</label>
-            <input type="number" name="eq_comptoir" class="form-control" min="0" step="1" value="0">
-          </div>
-          <div class="col-6 col-md-3">
-            <label class="form-label">Tonnelle</label>
-            <input type="number" name="eq_tonnelle" class="form-control" min="0" step="1" value="0">
-          </div>
-        </div>
+            client_id = int(wiz["client_id"])
+            mtype = wiz["type"]
 
-        <div>
-          <label class="form-label">Notes (optionnel)</label>
-          <textarea name="notes" class="form-control" rows="2" placeholder="Infos complémentaires"></textarea>
-        </div>
+            # Contrôle des retours vs enjeu
+            def _open_kegs_by_variant(client_id: int):
+                out_rows = dict(
+                    db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
+                    .filter(Movement.client_id == client_id, Movement.type == "OUT")
+                    .group_by(Movement.variant_id)
+                    .all()
+                )
+                back_rows = dict(
+                    db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
+                    .filter(Movement.client_id == client_id, Movement.type.in_(["IN", "DEFECT", "FULL"]))
+                    .group_by(Movement.variant_id)
+                    .all()
+                )
+                all_vids = set(out_rows) | set(back_rows)
+                return {vid: int(out_rows.get(vid, 0)) - int(back_rows.get(vid, 0)) for vid in all_vids}
 
-        <div class="d-flex gap-2">
-          <button class="btn btn-outline-secondary" type="button" onclick="addLine()">+ Ajouter une ligne</button>
-          <div class="ms-auto"></div>
-          <a class="btn btn-outline-secondary" href="{{ url_for('movement_wizard', step=3) }}">← Retour</a>
-          <button class="btn btn-success">Enregistrer</button>
-        </div>
-      </form>
+            violations = []
+            open_map = _open_kegs_by_variant(client_id) if mtype == "IN" else {}
 
-      <script>
-        function isEquipOnlyOption(selectEl) {
-          const txt = (selectEl.options[selectEl.selectedIndex]?.text || "").toLowerCase();
-          return txt.includes("matériel") && txt.includes("seul");
-        }
-        function applyEquipOnlyState(row, equipOnly) {
-          const qty = row.querySelector('.qty');
-          const price = row.querySelector('.price');
-          const deposit = row.querySelector('.deposit');
-          if (equipOnly) {
-            qty.value = 0; price.value = 0; deposit.value = 0;
-            qty.setAttribute('disabled','disabled');
-            price.setAttribute('disabled','disabled');
-            deposit.setAttribute('disabled','disabled');
-          } else {
-            qty.removeAttribute('disabled');
-            price.removeAttribute('disabled');
-            deposit.removeAttribute('disabled');
-          }
-        }
-        function bindLine(row) {
-          const select = row.querySelector('.variant-select');
-          select.addEventListener('change', function() {
-            applyEquipOnlyState(row, isEquipOnlyOption(select));
-          });
-        }
-        function addLine() {
-          const body = document.getElementById('lines-body');
-          const tpl = body.querySelector('tr.line');
-          const clone = tpl.cloneNode(true);
-          clone.querySelectorAll('input').forEach(i => {
-            if (i.classList.contains('qty')) i.value = 1; else i.value = '';
-            i.removeAttribute('disabled');
-          });
-          clone.querySelectorAll('select').forEach(s => { s.selectedIndex = 0; });
-          body.appendChild(clone);
-          bindLine(clone);
-        }
-        function removeLine(btn) {
-          const row = btn.closest('tr');
-          const body = document.getElementById('lines-body');
-          if (body.querySelectorAll('tr.line').length > 1) row.remove();
-        }
-        document.querySelectorAll('#lines-body tr.line').forEach(bindLine);
-      </script>
+            for i, vid in enumerate(variant_ids):
+                try:
+                    vid_int = int(vid)
+                except Exception:
+                    continue
 
-    {% else %}
-      <div class="alert alert-warning">Étape inconnue. <a href="{{ url_for('movement_wizard', step=1) }}">Recommencer</a></div>
-    {% endif %}
+                try:
+                    qty_int = int(qtys[i])
+                except Exception:
+                    qty_int = 0
 
-  </div>
-</div>
-{% endblock %}
+                up = None
+                if i < len(unit_prices) and unit_prices[i] not in ("", None):
+                    try:
+                        up = float(unit_prices[i])
+                    except Exception:
+                        up = None
+
+                dep = None
+                if i < len(deposits) and deposits[i] not in ("", None):
+                    try:
+                        dep = float(deposits[i])
+                    except Exception:
+                        dep = None
+
+                v = Variant.query.get(vid_int)
+                if not v:
+                    continue
+
+                pname = (v.product.name if v and v.product else "") or ""
+                is_equipment_only = "matériel" in pname.lower() and "seul" in pname.lower()
+                if is_equipment_only:
+                    qty_int = 0
+                    up = 0.0
+                    dep = 0.0
+                else:
+                    if up is None and (v.price_ttc is not None):
+                        up = v.price_ttc
+                    if dep is None:
+                        # Ecocup = 1 €, sinon 30 €
+                        dep = U.default_deposit_for_product(v.product)
+
+                    if mtype == "IN":
+                        open_q = int(open_map.get(vid_int, 0))
+                        if open_q <= 0 or qty_int > open_q:
+                            label = f"{v.product.name} — {v.size_l} L"
+                            violations.append((label, open_q))
+                            continue
+
+                mv = Movement(
+                    client_id=client_id,
+                    variant_id=vid_int,
+                    type=mtype,
+                    qty=qty_int,
+                    unit_price_ttc=up,
+                    deposit_per_keg=dep,
+                    notes=notes,
+                    created_at=created_at,
+                )
+                db.session.add(mv)
+
+                # MAJ inventaire bar (OUT / FULL)
+                inv = U.get_or_create_inventory(vid_int)
+                if mtype == "OUT":
+                    inv.qty = (inv.qty or 0) - qty_int
+                elif mtype == "FULL":
+                    inv.qty = (inv.qty or 0) + qty_int
+
+            if violations:
+                text = "Certains retours dépassent l’enjeu autorisé : " + ", ".join(
+                    f"{lab} (max {q})" for lab, q in violations
+                )
+                flash(text, "warning")
+                return redirect(url_for("movement_wizard", step=2))
+
+            db.session.commit()
+            flash("Saisie enregistrée.", "success")
+            session.pop("wiz", None)
+            return redirect(url_for("client_detail", client_id=client_id))
+
+        # GET -> afficher le formulaire de l’étape 4
+        return render_template("movement_wizard.html", step=4, wiz=wiz)
