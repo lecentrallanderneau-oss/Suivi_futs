@@ -92,37 +92,21 @@ def create_app():
             return redirect(url_for("clients"))
         return render_template("client_form.html")
 
-    @app.route("/client/<int:client_id>/edit", methods=["GET", "POST"])
-    def client_edit(client_id):
-        c = Client.query.get_or_404(client_id)
-        if request.method == "POST":
-            name = request.form.get("name", "").strip()
-            if not name:
-                flash("Nom obligatoire.", "warning")
-                return render_template("client_form.html", client=c)
-            c.name = name
-            db.session.commit()
-            flash("Client mis à jour.", "success")
-            return redirect(url_for("clients"))
-        return render_template("client_form.html", client=c)
-
-    @app.route("/client/<int:client_id>/delete", methods=["POST"])
-    def client_delete(client_id):
-        c = Client.query.get_or_404(client_id)
-        db.session.delete(c)
-        db.session.commit()
-        flash("Client supprimé.", "success")
-        return redirect(url_for("clients"))
-
     @app.route("/client/<int:client_id>")
     def client_detail(client_id):
         c = Client.query.get_or_404(client_id)
         view = U.summarize_client_detail(c)
+
+        # Historique trié
         movements = (
-            Movement.query.filter_by(client_id=client_id)
+            db.session.query(Movement, Variant, Product)
+            .join(Variant, Movement.variant_id == Variant.id)
+            .join(Product, Variant.product_id == Product.id)
+            .filter(Movement.client_id == client_id)
             .order_by(Movement.created_at.desc(), Movement.id.desc())
             .all()
         )
+
         return render_template(
             "client_detail.html",
             client=c,
@@ -140,7 +124,7 @@ def create_app():
         variants = (
             db.session.query(Variant)
             .join(Product, Variant.product_id == Product.id)
-            .filter(~Product.name.ilike("%ecocup%"), ~Product.name.ilike("%gobelet%"))
+            # ⬇️ on N'EXCLUT PLUS ecocup/gobelet → visibilité dans le catalogue
             .order_by(Product.name, Variant.size_l)
             .all()
         )
@@ -157,84 +141,61 @@ def create_app():
             session["wiz"] = {}
         wiz = session["wiz"]
 
-        # Préselection client éventuelle
-        q_client_id = request.args.get("client_id", type=int)
-        if q_client_id:
-            wiz["client_id"] = q_client_id
-            session.modified = True
+        step = int(request.args.get("step", 1))
+        if request.method == "POST":
+            # step switch via POST
+            goto = request.args.get("step")
+            if goto:
+                step = int(goto)
 
-        if request.method == "GET":
-            step = int(request.args.get("step", 1))
-            if step == 1:
-                # Date NON pré-remplie ; si vide à l’enregistrement -> date de saisie
-                return render_template("movement_wizard.html", step=1, wiz=wiz)
-            elif step == 2:
-                clients = Client.query.order_by(Client.name.asc()).all()
-                return render_template("movement_wizard.html", step=2, wiz=wiz, clients=clients)
-            elif step == 3:
-                current_client = Client.query.get(wiz["client_id"]) if wiz.get("client_id") else None
-                return render_template("movement_wizard.html", step=3, wiz=wiz, current_client=current_client)
-            elif step == 4:
-                # Base: tout sauf ecocup/gobelet
-                base_q = (
-                    db.session.query(Variant)
-                    .join(Product, Variant.product_id == Product.id)
-                    .filter(~Product.name.ilike("%ecocup%"), ~Product.name.ilike("%gobelet%"))
-                    .order_by(Product.name, Variant.size_l)
-                )
-
-                # En Reprise (IN) : limiter aux fûts “en jeu” + TOUJOURS ajouter “Matériel seul …”
-                if wiz.get("type") == "IN" and wiz.get("client_id"):
-                    open_map = _open_kegs_by_variant(wiz["client_id"])
-                    allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
-
-                    equip_ids = set(
-                        vid for (vid,) in (
-                            db.session.query(Variant.id)
-                            .join(Product, Variant.product_id == Product.id)
-                            .filter(
-                                (~Product.name.ilike("%ecocup%")),
-                                (~Product.name.ilike("%gobelet%")),
-                                (
-                                    Product.name.ilike("%matériel%seul%")
-                                    | Product.name.ilike("%materiel%seul%")
-                                    | Product.name.ilike("%Matériel seul%")
-                                    | Product.name.ilike("%Materiel seul%")
-                                )
-                            )
-                            .all()
-                        )
-                    )
-
-                    final_ids = list(allowed_ids | equip_ids)
-                    if final_ids:
-                        base_q = base_q.filter(Variant.id.in_(final_ids))
-                    else:
-                        base_q = base_q.filter(Variant.id.in_([-1]))
-                        flash("Aucune référence disponible à la reprise pour ce client.", "info")
-
-                variants = base_q.all()
-                return render_template("movement_wizard.html", step=4, wiz=wiz, variants=variants)
-            return redirect(url_for("movement_wizard", step=1))
-
-        # POST
-        step = int(request.form.get("step", 1))
-        if step == 1:
-            mtype = request.form.get("type")
-            if mtype not in U.MOV_TYPES:
-                flash("Type invalide.", "warning")
-                return redirect(url_for("movement_wizard", step=1))
-            wiz["type"] = mtype
-            wiz["date"] = request.form.get("date") or None  # peut rester vide -> date de saisie
+        if step == 1 and request.method == "POST":
+            wiz["client_id"] = request.form.get("client_id", type=int)
+            wiz["type"] = request.form.get("type")
+            wiz["date"] = request.form.get("date")  # AAAA-MM-JJ
             session.modified = True
             return redirect(url_for("movement_wizard", step=2))
 
         elif step == 2:
-            client_id = request.form.get("client_id", type=int)
-            if not Client.query.get(client_id):
-                flash("Client introuvable.", "warning")
-                return redirect(url_for("movement_wizard", step=2))
-            wiz["client_id"] = client_id
+            clients = Client.query.order_by(Client.name.asc()).all()
+            base_q = (
+                db.session.query(Variant, Product)
+                .join(Product, Variant.product_id == Product.id)
+                # ⬇️ on N'EXCLUT PLUS ecocup/gobelet → visible dans le wizard
+                .order_by(Product.name, Variant.size_l)
+            )
+
+            # En Reprise (IN) : limiter aux fûts “en jeu” + TOUJOURS ajouter “Matériel seul …”
+            if wiz.get("type") == "IN" and wiz.get("client_id"):
+                open_map = _open_kegs_by_variant(wiz["client_id"])
+                allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
+
+                equip_ids = set(
+                    vid for (vid,) in (
+                        db.session.query(Variant.id)
+                        .join(Product, Variant.product_id == Product.id)
+                        .filter(
+                            (
+                                Product.name.ilike("%matériel%seul%")
+                                | Product.name.ilike("%materiel%seul%")
+                                | Product.name.ilike("%Matériel seul%")
+                                | Product.name.ilike("%Materiel seul%")
+                            )
+                        )
+                        .all()
+                    )
+                )
+
+                final_ids = list(allowed_ids | equip_ids)
+                if final_ids:
+                    base_q = base_q.filter(Variant.id.in_(final_ids))
+
+            rows = base_q.all()
+            return render_template("movement_wizard.html", step=2, clients=clients, rows=rows, wiz=wiz)
+
+        elif step == 2 and request.method == "POST":
+            # sélection de variantes → step 3
+            vids = request.form.getlist("variant_id")
+            wiz["variant_ids"] = [int(v) for v in vids]
             session.modified = True
             return redirect(url_for("movement_wizard", step=3))
 
@@ -266,22 +227,20 @@ def create_app():
             # Matériel prêté/repris (inséré en note)
             t = request.form.get("eq_tireuse", type=int)
             c2 = request.form.get("eq_co2", type=int)
-            cp = request.form.get("eq_comptoir", type=int)
-            tn = request.form.get("eq_tonnelle", type=int)
-            if any(v is not None for v in (t, c2, cp, tn)):
-                t = t or 0
-                c2 = c2 or 0
-                cp = cp or 0
-                tn = tn or 0
-                eq_note = f"tireuse={t};co2={c2};comptoir={cp};tonnelle={tn}"
-                notes = f"{(notes + ';') if notes else ''}{eq_note}"
+            cpt = request.form.get("eq_comptoir", type=int)
+            ton = request.form.get("eq_tonnelle", type=int)
+            equip_parts = []
+            if t:   equip_parts.append(f"tireuse={t}")
+            if c2:  equip_parts.append(f"co2={c2}")
+            if cpt: equip_parts.append(f"comptoir={cpt}")
+            if ton: equip_parts.append(f"tonnelle={ton}")
+            notes = (";".join(equip_parts) + (";" + notes if notes else "")) or None
 
+            client_id = int(wiz["client_id"])
             mtype = wiz["type"]
-            client_id = wiz["client_id"]
 
-            open_map = _open_kegs_by_variant(client_id) if mtype == "IN" else {}
-            created = 0
             violations = []
+            open_map = _open_kegs_by_variant(client_id) if mtype == "IN" else {}
 
             for i, vid in enumerate(variant_ids):
                 try:
@@ -290,18 +249,19 @@ def create_app():
                     continue
 
                 try:
-                    qty_int = int(qtys[i]) if i < len(qtys) else 0
+                    qty_int = int(qtys[i])
                 except Exception:
                     qty_int = 0
 
                 up = None
-                dep = None
-                if i < len(unit_prices) and unit_prices[i]:
+                if i < len(unit_prices) and unit_prices[i] not in ("", None):
                     try:
                         up = float(unit_prices[i])
                     except Exception:
                         up = None
-                if i < len(deposits) and deposits[i]:
+
+                dep = None
+                if i < len(deposits) and deposits[i] not in ("", None):
                     try:
                         dep = float(deposits[i])
                     except Exception:
@@ -311,7 +271,7 @@ def create_app():
                 if not v:
                     continue
 
-                # “Matériel seul” => forcer 0 partout et PAS de contrôle d’enjeu de fûts
+                # “Matériel seul” => pas d'enjeu de fûts ni de consigne/prix
                 pname = (v.product.name if v and v.product else "") or ""
                 is_equipment_only = "matériel" in pname.lower() and "seul" in pname.lower()
                 if is_equipment_only:
@@ -322,7 +282,8 @@ def create_app():
                     if up is None and (v.price_ttc is not None):
                         up = v.price_ttc
                     if dep is None:
-                        dep = U.DEFAULT_DEPOSIT  # 30€
+                        # ⬇️ consigne par défaut par produit (Ecocup = 1 €, sinon 30 €)
+                        dep = U.default_deposit_for_product(v.product)
 
                     if mtype == "IN":
                         open_q = int(open_map.get(vid_int, 0))
@@ -343,27 +304,47 @@ def create_app():
                 )
                 db.session.add(mv)
 
-                if qty_int > 0:
-                    U.apply_inventory_effect(mtype, vid_int, qty_int)
-                created += 1
+                # MÀJ inventaire (bar) sur OUT/FULL
+                inv = U.get_or_create_inventory(vid_int)
+                if mtype == "OUT":
+                    inv.qty = (inv.qty or 0) - qty_int
+                elif mtype == "FULL":
+                    inv.qty = (inv.qty or 0) + qty_int
 
             if violations:
-                db.session.rollback()
-                msgs = [f"{label} (max {maxq})" for (label, maxq) in violations]
-                flash("Reprise impossible pour : " + ", ".join(msgs), "warning")
-                return redirect(url_for("movement_wizard", step=4))
+                text = "Certains retours dépassent l’enjeu autorisé : " + ", ".join(
+                    f"{lab} (max {q})" for lab, q in violations
+                )
+                flash(text, "warning")
+                return redirect(url_for("movement_wizard", step=2))
 
             db.session.commit()
-            if created:
-                flash(f"{created} ligne(s) enregistrée(s).", "success")
-                return redirect(url_for("client_detail", client_id=client_id))
-            else:
-                flash("Aucune ligne valide.", "warning")
-                return redirect(url_for("movement_wizard", step=4))
+            flash("Saisie enregistrée.", "success")
+            session.pop("wiz", None)
+            return redirect(url_for("client_detail", client_id=client_id))
 
-        return redirect(url_for("movement_wizard", step=1))
+        # GET step pages
+        if step == 1:
+            clients = Client.query.order_by(Client.name.asc()).all()
+            return render_template("movement_wizard.html", step=1, clients=clients, rows=[], wiz=wiz)
 
-    # ---- suppression mouvement ----
+        elif step == 2:
+            clients = Client.query.order_by(Client.name.asc()).all()
+            base_q = (
+                db.session.query(Variant, Product)
+                .join(Product, Variant.product_id == Product.id)
+                # ⬇️ idem: Ecocup visibles
+                .order_by(Product.name, Variant.size_l)
+            )
+            rows = base_q.all()
+            return render_template("movement_wizard.html", step=2, clients=clients, rows=rows, wiz=wiz)
+
+        elif step == 3:
+            return render_template("movement_wizard.html", step=3, wiz=wiz)
+
+        elif step == 4:
+            return render_template("movement_wizard.html", step=4, wiz=wiz)
+
     @app.route("/movement/<int:movement_id>/confirm-delete", methods=["GET"])
     def movement_confirm_delete(movement_id):
         m = Movement.query.get_or_404(movement_id)
@@ -372,12 +353,9 @@ def create_app():
     @app.route("/movement/<int:movement_id>/delete", methods=["POST"])
     def movement_delete(movement_id):
         m = Movement.query.get_or_404(movement_id)
-        client_id = m.client_id  # sauvegarde avant suppression
+        client_id = m.client_id
 
-        # RÉTABLIR LE STOCK ICI (au lieu d'appeler utils.revert_inventory_effect)
-        # - OUT   : on remet +qty en stock
-        # - FULL  : on retire qty du stock (retour plein annulé)
-        # - IN/DEFECT : pas d’impact sur le stock de fûts pleins
+        # Rétablir l’inventaire
         if m.qty and m.variant_id:
             inv = U.get_or_create_inventory(m.variant_id)
             if m.type == "OUT":
@@ -395,47 +373,21 @@ def create_app():
     def stock():
         if request.method == "POST":
             changed = 0
-
-            # QTY_*  -> Inventory
-            for key, val in request.form.items():
-                if not key.startswith("qty_"):
-                    continue
-                try:
-                    vid = int(key.split("_", 1)[1])
-                except Exception:
-                    continue
-                try:
-                    qty = int(val or 0)
-                except Exception:
-                    qty = 0
-                inv = U.get_or_create_inventory(vid)
-                if inv.qty != qty:
-                    inv.qty = qty
+            for k, v in request.form.items():
+                if k.startswith("qty_"):
+                    vid = int(k.split("_", 1)[1])
+                    inv = U.get_or_create_inventory(vid)
+                    inv.qty = int(v or 0)
                     changed += 1
-
-            # MIN_* -> ReorderRule
-            for key, val in request.form.items():
-                if not key.startswith("min_"):
-                    continue
-                try:
-                    vid = int(key.split("_", 1)[1])
-                except Exception:
-                    continue
-                try:
-                    minq = int(val or 0)
-                except Exception:
-                    minq = 0
-
-                rule = ReorderRule.query.filter_by(variant_id=vid).first()
-                if not rule:
-                    rule = ReorderRule(variant_id=vid, min_qty=minq)
-                    db.session.add(rule)
+                elif k.startswith("min_"):
+                    vid = int(k.split("_", 1)[1])
+                    rr = ReorderRule.query.filter_by(variant_id=vid).first()
+                    if not rr:
+                        rr = ReorderRule(variant_id=vid, min_qty=int(v or 0))
+                        db.session.add(rr)
+                    else:
+                        rr.min_qty = int(v or 0)
                     changed += 1
-                else:
-                    if rule.min_qty != minq:
-                        rule.min_qty = minq
-                        changed += 1
-
             db.session.commit()
             flash(f"Inventaire enregistré ({changed} mise(s) à jour).", "success")
             return redirect(url_for("stock"))
