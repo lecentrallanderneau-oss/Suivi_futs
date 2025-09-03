@@ -15,9 +15,11 @@ def create_app():
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     db.init_app(app)
 
+    # ----------------- bootstrap DB -----------------
     with app.app_context():
         db.create_all()
         seed_if_empty()
+        _ensure_ecocup_simple()  # ⬅️ crée le produit Ecocup générique si manquant
 
     # ----------------- Healthcheck -----------------
     @app.route("/healthz", methods=["GET", "HEAD"])
@@ -135,9 +137,8 @@ def create_app():
     # ---------- Filtre robuste pour masquer “ecocup lavage/perdu” ----------
     def _hide_ecocup_maintenance(query):
         """
-        Masque tous les produits dont le nom contient (ecocup|eco cup|gobelet)
+        Masque les produits dont le nom contient (ecocup|eco cup|gobelet)
         ET (lavage|perdu|perte|wash|clean).
-        Utilise un LIKE case-insensible via lower() pour compatibilité max.
         """
         name_lc = func.lower(Product.name)
         is_cup = (
@@ -152,19 +153,19 @@ def create_app():
             | name_lc.like("%wash%")
             | name_lc.like("%clean%")
         )
-        exclude = and_(is_cup, is_maintenance)
-        return query.filter(~exclude)
+        return query.filter(~and_(is_cup, is_maintenance))
 
     @app.route("/catalog")
     def catalog():
+        # IMPORTANT : retourner des paires (Variant, Product) et passer 'rows' au template
         base_q = (
-            db.session.query(Variant)
+            db.session.query(Variant, Product)
             .join(Product, Variant.product_id == Product.id)
             .order_by(Product.name, Variant.size_l)
         )
-        base_q = _hide_ecocup_maintenance(base_q)  # ⬅️ masque nettoyage/perdu
-        variants = base_q.all()
-        return render_template("catalog.html", variants=variants)
+        base_q = _hide_ecocup_maintenance(base_q)  # masque lavage/perdu
+        rows = base_q.all()
+        return render_template("catalog.html", rows=rows)
 
     # ------------- Saisie (wizard) -------------
     @app.route("/movement/new", methods=["GET"])
@@ -202,7 +203,6 @@ def create_app():
         # ---------- ÉTAPE 1 : type + date (et client si pas déjà fixé) ----------
         if step == 1:
             if request.method == "POST":
-                # Si le client n'est pas déjà connu (pas depuis fiche client), lire le select
                 if "client_id" not in wiz:
                     wiz["client_id"] = request.form.get("client_id", type=int)
                 wiz["type"] = request.form.get("type")
@@ -239,40 +239,30 @@ def create_app():
                 session.modified = True
                 return redirect(url_for("movement_wizard", step=3))
 
-            # GET : liste de variantes (en masquant ecocup lavage/perdu)
+            # GET : liste de variantes (masque maintenance)
             clients = Client.query.order_by(Client.name.asc()).all()
-
             base_q = (
                 db.session.query(Variant, Product)
                 .join(Product, Variant.product_id == Product.id)
                 .order_by(Product.name, Variant.size_l)
             )
-            # masque “ecocup maintenance”
             base_q = _hide_ecocup_maintenance(base_q)
 
-            # Si c'est un retour (IN), limiter aux variantes réellement en jeu + matériel seul
+            # Si c'est un retour (IN), limiter aux variantes réellement en jeu + "Matériel seul"
             if wiz.get("type") == "IN" and wiz.get("client_id"):
                 open_map = _open_kegs_by_variant(wiz["client_id"])
                 allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
-
                 equip_ids = set(
                     vid for (vid,) in (
                         db.session.query(Variant.id)
                         .join(Product, Variant.product_id == Product.id)
                         .filter(
-                            and_(
-                                func.lower(Product.name).like("%matériel%"),
-                                func.lower(Product.name).like("%seul%")
-                            )
-                            | and_(
-                                func.lower(Product.name).like("%materiel%"),
-                                func.lower(Product.name).like("%seul%")
-                            )
+                            and_(func.lower(Product.name).like("%matériel%"), func.lower(Product.name).like("%seul%"))
+                            | and_(func.lower(Product.name).like("%materiel%"), func.lower(Product.name).like("%seul%"))
                         )
                         .all()
                     )
                 )
-
                 final_ids = list(allowed_ids | equip_ids)
                 if final_ids:
                     base_q = base_q.filter(Variant.id.in_(final_ids))
@@ -481,6 +471,41 @@ def create_app():
         return render_template("500.html"), 500
 
     return app
+
+
+# ---------- Data guard : crée le produit “Ecocup” générique si manquant ----------
+def _ensure_ecocup_simple():
+    """
+    Si aucun produit 'Ecocup' générique n'existe (hors 'lavage/perdu/perte/wash/clean'),
+    on le crée + 1 variante (taille vide) pour qu'il apparaisse dans Catalogue/Saisie/Stock.
+    """
+    name_lc = func.lower(Product.name)
+    is_cup = (name_lc.like("%ecocup%") | name_lc.like("%eco cup%") | name_lc.like("%gobelet%"))
+    is_maintenance = (
+        name_lc.like("%lavage%")
+        | name_lc.like("%perdu%")
+        | name_lc.like("%perte%")
+        | name_lc.like("%wash%")
+        | name_lc.like("%clean%")
+    )
+    # Produit ecocup générique = ecocup && !maintenance
+    p = Product.query.filter(is_cup, ~is_maintenance).first()
+    if p:
+        # s'assurer qu'il possède au moins 1 variante
+        v_any = Variant.query.filter_by(product_id=p.id).first()
+        if not v_any:
+            v = Variant(product_id=p.id, size_l=None, price_ttc=None)
+            db.session.add(v)
+            db.session.commit()
+        return
+
+    # Aucun produit ecocup “simple” → on le crée
+    p = Product(name="Ecocup")
+    db.session.add(p)
+    db.session.flush()  # pour récupérer p.id
+    v = Variant(product_id=p.id, size_l=None, price_ttc=None)
+    db.session.add(v)
+    db.session.commit()
 
 
 app = create_app()
