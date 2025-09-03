@@ -199,7 +199,6 @@ def get_stock_items() -> List[Tuple[Variant, Product, int, int]]:
     - inv_qty : quantité d'inventaire actuelle (bar)
     - min_qty : seuil mini (règle de réassort)
     """
-    # Toutes les variantes + produits
     rows = (
         db.session.query(Variant, Product)
         .join(Product, Variant.product_id == Product.id)
@@ -219,8 +218,14 @@ def get_stock_items() -> List[Tuple[Variant, Product, int, int]]:
 
 def compute_reorder_alerts() -> List[Dict]:
     """
-    Construit la liste des alertes de réassort :
-    [{ 'variant_id': ..., 'product': 'Nom', 'size_l': 30.0, 'inv_qty': 1, 'min_qty': 3, 'missing': 2 }, ...]
+    Construit la liste des alertes de réassort POUR LES MACROS EXISTANTES :
+    Chaque élément est un dict avec au minimum:
+      - 'variant': objet Variant
+      - 'product': objet Product
+      - 'inv_qty': int
+      - 'min_qty': int
+      - 'missing': int (min - inv)
+    -> Compatible avec {{ a.product.name }} et {{ a.variant.size_l }} dans _macros.html
     """
     alerts: List[Dict] = []
     # On part des règles connues
@@ -235,13 +240,15 @@ def compute_reorder_alerts() -> List[Dict]:
         min_qty = _to_int(rr.min_qty if rr and rr.min_qty is not None else 0, 0)
         if min_qty > inv_qty:
             alerts.append({
-                "variant_id": v.id,
-                "product": (p.name if p else f"Var#{v.id}"),
-                "size_l": _to_float(v.size_l, None),
+                "variant": v,
+                "product": p,
                 "inv_qty": inv_qty,
                 "min_qty": min_qty,
                 "missing": (min_qty - inv_qty),
+                # Champs de compatibilité optionnels si d'autres templates en ont besoin:
+                "product_name": (p.name if p else f"Var#{v.id}"),
+                "size_l": getattr(v, "size_l", None),
             })
-    # Tri : manque le plus élevé d'abord, puis par nom
-    alerts.sort(key=lambda a: (-a["missing"], a["product"]))
+    # Tri : manque le plus élevé d'abord, puis par nom produit
+    alerts.sort(key=lambda a: (-a["missing"], a["product"].name if a.get("product") else ""))
     return alerts
