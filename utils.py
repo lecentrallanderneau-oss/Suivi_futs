@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Dict
+from dataclasses import dataclass, asdict
+from typing import Optional, Dict, List
 from types import SimpleNamespace
 
 from sqlalchemy import func
@@ -20,7 +20,7 @@ class Equipment:
     co2: int = 0
     comptoir: int = 0
     tonnelle: int = 0
-    ecocup: int = 0   # prêt de gobelets via notes (optionnel, inchangé)
+    ecocup: int = 0   # prêt de gobelets via notes (optionnel)
 
 
 def now_utc():
@@ -53,6 +53,7 @@ def parse_equipment(notes: Optional[str]) -> Equipment:
                 elif k == "ecocup":
                     eq.ecocup = val
     except Exception:
+        # Parsing permissif: on ignore les erreurs de note
         pass
     return eq
 
@@ -79,18 +80,19 @@ def is_ecocup_product(product_name: Optional[str]) -> bool:
     return ("ecocup" in name) or ("éco" in name and "cup" in name) or ("gobelet" in name)
 
 
-def effective_deposit(m: Movement, product_name: Optional[str]) -> float:
+def effective_deposit(m: Movement, product_name: Optional[str] = None) -> float:
     """
     Retourne la consigne effective pour la ligne:
       - si la consigne est saisie sur le mouvement => on l'utilise
       - sinon: 1,00 € si produit Ecocup ; 30,00 € sinon (fûts)
+    Signature tolérante: 'product_name' est optionnel pour compat.
     """
     if m.deposit_per_keg is not None:
         try:
             return float(m.deposit_per_keg)
         except Exception:
             pass
-    if is_ecocup_product(product_name):
+    if product_name and is_ecocup_product(product_name):
         return float(DEFAULT_ECOCUP_DEPOSIT)
     return float(DEFAULT_KEG_DEPOSIT)
 
@@ -108,11 +110,12 @@ def client_movements_full(client_id: int):
 
 
 def summarize_client_detail(c: Client) -> Dict:
-    rows = []
+    rows: List[Dict] = []
     beer_eur = 0.0
     deposit_eur = 0.0
     equipment = Equipment()
     liters_out_cum = 0.0
+    last_date = None
 
     for m, v, p in client_movements_full(c.id):
         price = effective_price(m, v) or 0.0
@@ -127,8 +130,8 @@ def summarize_client_detail(c: Client) -> Dict:
         elif m.type in {"IN", "DEFECT", "FULL"}:
             if m.type == "IN":
                 combine_equipment(equipment, eq, -1)
-        else:
-            pass
+
+        last_date = last_date or m.created_at  # première (la plus récente, grâce au tri)
 
         rows.append(dict(
             id=m.id,
@@ -161,4 +164,79 @@ def summarize_client_detail(c: Client) -> Dict:
         deposit_eur=round(deposit_eur, 2),
         equipment=equipment,
         liters_out_cum=round(liters_out_cum, 2),
+        last_movement_date=last_date,
     )
+
+
+# --- Fonctions réintroduites pour compat avec app.py / templates ---
+
+def summarize_client_for_index(c: Client):
+    """
+    Version compacte pour la page d’accueil.
+    Fournit un objet à accès par attributs (SimpleNamespace) ET compatible accès dict (Jinja).
+    Champs inclus (garder large pour compat template):
+      - client / client_id / client_name
+      - kegs, beer_eur, deposit_eur, equipment, liters_out_cum, last_movement_date
+    """
+    d = summarize_client_detail(c)
+    payload = {
+        "client": c,
+        "client_id": c.id,
+        "client_name": c.name,
+        "kegs": d.get("kegs", 0),
+        "beer_eur": d.get("beer_eur", 0.0),
+        "deposit_eur": d.get("deposit_eur", 0.0),
+        "equipment": d.get("equipment"),
+        "liters_out_cum": d.get("liters_out_cum", 0.0),
+        "last_movement_date": d.get("last_movement_date"),
+    }
+    ns = SimpleNamespace(**payload)
+    # astuce: on garde aussi un champ __dict__ utilisable comme mapping en Jinja
+    return ns
+
+
+def get_stock_items():
+    """
+    Retourne la liste des items de stock (par variante), avec info produit, quantité et seuil.
+    Champs par ligne (accès attributs ET dot Jinja):
+      - product_id, product_name
+      - variant_id, size_l
+      - qty (stock courant)
+      - reorder_min (seuil si règle trouvée, sinon None)
+      - below_min (bool)
+      - status ('LOW' | 'OK')
+    """
+    # Stock agrégé par variante
+    inv = dict(
+        db.session.query(Inventory.variant_id, func.coalesce(func.sum(Inventory.qty), 0))
+        .group_by(Inventory.variant_id)
+        .all()
+    )
+
+    # Règles de réassort par variante (optionnelles)
+    rules = {r.variant_id: r.min_qty for r in ReorderRule.query.all()}
+
+    rows: List[SimpleNamespace] = []
+    q = (
+        db.session.query(Variant, Product)
+        .join(Product, Variant.product_id == Product.id)
+        .order_by(Product.name.asc(), Variant.size_l.asc())
+    )
+    for v, p in q.all():
+        qty = int(inv.get(v.id, 0) or 0)
+        min_qty = rules.get(v.id)
+        below = (min_qty is not None) and (qty < int(min_qty))
+        status = "LOW" if below else "OK"
+        payload = dict(
+            product_id=p.id,
+            product_name=p.name,
+            variant_id=v.id,
+            size_l=getattr(v, "size_l", None),
+            qty=qty,
+            reorder_min=min_qty,
+            below_min=bool(below),
+            status=status,
+        )
+        rows.append(SimpleNamespace(**payload))
+
+    return rows
