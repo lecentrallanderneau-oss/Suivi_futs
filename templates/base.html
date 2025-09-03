@@ -5,40 +5,76 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block title %}Suivi fûts{% endblock %}</title>
 
-    <!-- Ta feuille de style existante : on la laisse faire TOUT le look -->
+    <!-- Polices agréables -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+
+    <!-- Bootstrap 5 (rétablit les boutons, cartes, tableaux, nav, etc.) -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Ta feuille de style (si présente, elle surcharge ce qu’il faut) -->
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 
     {% block head %}{% endblock %}
-    {% block extra_css %}{% endblock %}
+
+    <style>
+      /* Base douce + chips si style.css absent */
+      :root { --brand:#0d6efd; }
+      html, body { height: 100%; }
+      body { font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; background:#f8fafc; }
+      .brand-gradient { background: linear-gradient(90deg, var(--brand), #53a6ff); -webkit-background-clip:text; background-clip:text; color: transparent; }
+      .chip { display:inline-block; padding:.25rem .5rem; border-radius:999px; font-size:.85rem; border:1px solid rgba(0,0,0,.08); background:#f3f4f6; }
+      .chip-gray { background:#eef1f5; }
+      .navbar-brand { font-weight:700; letter-spacing:.2px; }
+      .content-card { background:#fff; border:1px solid rgba(0,0,0,.06); border-radius:12px; }
+    </style>
   </head>
   <body>
-    <!-- NAVBAR : structure inchangée, pas de styles imposés -->
-    <header class="navbar">
-      <a class="navbar-brand" href="{{ url_for('index') }}">Suivi fûts</a>
-      <nav class="nav">
-        <a class="nav-link {% if request.endpoint == 'index' %}active{% endif %}"
-           href="{{ url_for('index') }}">Accueil</a>
+    <!-- NAVBAR Bootstrap -->
+    <nav class="navbar navbar-expand-lg bg-white border-bottom">
+      <div class="container">
+        <a class="navbar-brand brand-gradient" href="{{ url_for('index') }}">Suivi fûts</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav">
+          <span class="navbar-toggler-icon"></span>
+        </button>
 
-        <a class="nav-link {% if request.endpoint == 'clients' %}active{% endif %}"
-           href="{{ url_for('clients') }}">Clients</a>
+        <div id="mainNav" class="collapse navbar-collapse">
+          <ul class="navbar-nav ms-auto">
+            <li class="nav-item">
+              <a class="nav-link {% if request.endpoint == 'index' %}active{% endif %}"
+                 href="{{ url_for('index') }}">Accueil</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link {% if request.endpoint == 'clients' %}active{% endif %}"
+                 href="{{ url_for('clients') }}">Clients</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link {% if request.endpoint == 'stock' %}active{% endif %}"
+                 href="{{ url_for('stock') }}">Stock</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link {% if request.endpoint == 'catalog' %}active{% endif %}"
+                 href="{{ url_for('catalog') }}">Catalogue</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link {% if request.endpoint == 'movement_wizard' %}active{% endif %}"
+                 href="{{ url_for('movement_wizard', step=1) }}">Saisie</a>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </nav>
 
-        <a class="nav-link {% if request.endpoint == 'stock' %}active{% endif %}"
-           href="{{ url_for('stock') }}">Stock</a>
-
-        <a class="nav-link {% if request.endpoint == 'catalog' %}active{% endif %}"
-           href="{{ url_for('catalog') }}">Catalogue</a>
-
-        <a class="nav-link {% if request.endpoint == 'movement_wizard' %}active{% endif %}"
-           href="{{ url_for('movement_wizard', step=1) }}">Saisie</a>
-      </nav>
-    </header>
-
-    <main class="container">
-      <!-- Flash messages -->
+    <!-- CONTENU -->
+    <main class="container my-4">
+      <!-- Flash messages (Bootstrap) -->
       {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
           {% for category, message in messages %}
-            <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% set cat = category if category in ['primary','secondary','success','danger','warning','info','light','dark'] else 'info' %}
+            <div class="alert alert-{{ cat }} alert-dismissible fade show" role="alert">
+              {{ message }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fermer"></button>
+            </div>
           {% endfor %}
         {% endif %}
       {% endwith %}
@@ -46,7 +82,8 @@
       {% block content %}{% endblock %}
     </main>
 
+    <!-- JS Bootstrap -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     {% block scripts %}{% endblock %}
-    {% block extra_js %}{% endblock %}
   </body>
 </html>
