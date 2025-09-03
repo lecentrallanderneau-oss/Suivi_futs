@@ -261,3 +261,77 @@ def get_stock_items():
         ))
 
     return rows
+
+
+def compute_reorder_alerts():
+    """
+    Calcule les alertes de réassort attendues par l’accueil.
+    Retourne UNIQUEMENT les variantes en dessous du seuil défini dans ReorderRule.
+    Chaque alerte est un SimpleNamespace avec:
+      - product_id, product_name
+      - variant_id, size_l
+      - qty (stock courant)
+      - min_qty (seuil)
+      - delta (min_qty - qty, >0)
+      - status = 'LOW'
+    Si aucune règle n’est définie → renvoie [] (pas d’alertes).
+    """
+    # Récup stock agrégé
+    inv = dict(
+        db.session.query(Inventory.variant_id, func.coalesce(func.sum(Inventory.qty), 0))
+        .group_by(Inventory.variant_id)
+        .all()
+    )
+    # Règles
+    rules = {r.variant_id: int(r.min_qty) for r in ReorderRule.query.all()}
+    if not rules:
+        return []
+
+    alerts: List[SimpleNamespace] = []
+
+    q = (
+        db.session.query(Variant, Product)
+        .join(Product, Variant.product_id == Product.id)
+    )
+    for v, p in q.all():
+        if v.id not in rules:
+            continue
+        qty = int(inv.get(v.id, 0) or 0)
+        min_qty = rules[v.id]
+        if qty < min_qty:
+            delta = int(min_qty - qty)
+            alerts.append(SimpleNamespace(
+                product_id=p.id,
+                product_name=p.name,
+                variant_id=v.id,
+                size_l=getattr(v, "size_l", None),
+                qty=qty,
+                min_qty=min_qty,
+                delta=delta,
+                status="LOW",
+            ))
+
+    # Tri: les plus urgents d’abord (delta le plus grand), puis nom produit
+    alerts.sort(key=lambda a: (-a.delta, a.product_name or "", a.size_l or 0))
+    return alerts
+
+
+# --- Helpers d'affichage tolérants (facultatif, pour éviter d'autres AttributeError côté templates) ---
+
+def format_eur(x):
+    try:
+        return f"{float(x):.2f} €"
+    except Exception:
+        return "0.00 €"
+
+def fmt_qty(x):
+    try:
+        return int(x)
+    except Exception:
+        return 0
+
+def fmt_date(dt):
+    try:
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return ""
