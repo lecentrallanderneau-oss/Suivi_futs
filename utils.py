@@ -8,7 +8,7 @@ from sqlalchemy import func
 from models import db, Client, Product, Variant, Movement, Inventory, ReorderRule
 
 # --- Constantes ---
-DEFAULT_DEPOSIT = 30.0             # attendu par app.py (wizard)
+DEFAULT_DEPOSIT = 30.0             # consigne par fût (nom conservé pour compat)
 DEFAULT_ECOCUP_DEPOSIT = 1.0       # consigne par gobelet
 MOV_TYPES = {"OUT", "IN", "DEFECT", "FULL"}  # FULL = retour plein
 
@@ -20,6 +20,7 @@ class Equipment:
     co2: int = 0
     comptoir: int = 0
     tonnelle: int = 0
+    ecocup: int = 0   # prêt de gobelets (compat historique via notes)
 
 
 @dataclass
@@ -62,6 +63,8 @@ def parse_equipment(notes: Optional[str]) -> Equipment:
                     eq.comptoir = val
                 elif k == "tonnelle":
                     eq.tonnelle = val
+                elif k == "ecocup":
+                    eq.ecocup = val
     except Exception:
         # parsing permissif
         pass
@@ -69,10 +72,11 @@ def parse_equipment(notes: Optional[str]) -> Equipment:
 
 
 def combine_equipment(dst: Equipment, src: Equipment, sign: int):
-    dst.tireuse += sign * (src.tireuse or 0)
-    dst.co2 += sign * (src.co2 or 0)
+    dst.tireuse  += sign * (src.tireuse  or 0)
+    dst.co2      += sign * (src.co2      or 0)
     dst.comptoir += sign * (src.comptoir or 0)
     dst.tonnelle += sign * (src.tonnelle or 0)
+    dst.ecocup   += sign * (src.ecocup   or 0)
 
 
 # --- Prix / Consigne effectifs ---
@@ -87,12 +91,12 @@ def _is_ecocup_name(name: Optional[str]) -> bool:
     return ("ecocup" in n) or ("gobelet" in n) or ("eco cup" in n) or ("eco-cup" in n)
 
 
-def is_ecocup_product(product: Product) -> bool:
+def is_ecocup_product(product: Optional[Product]) -> bool:
     return _is_ecocup_name(product.name if product else None)
 
 
 def default_deposit_for_product(product: Optional[Product]) -> float:
-    return DEFAULT_ECOCUP_DEPOSIT if (product and is_ecocup_product(product)) else DEFAULT_DEPOSIT
+    return DEFAULT_ECOCUP_DEPOSIT if is_ecocup_product(product) else DEFAULT_DEPOSIT
 
 
 def effective_deposit(m: Movement, product: Optional[Product] = None) -> float:
@@ -119,12 +123,12 @@ def get_stock_items():
     variants = (
         db.session.query(Variant)
         .join(Product, Variant.product_id == Product.id)
-        # On conserve l’exclusion des gobelets dans la page "Stock bar (fûts pleins)"
+        # On garde l’exclusion des gobelets sur la page "Stock bar (fûts pleins)"
         .filter(~Product.name.ilike("%ecocup%"), ~Product.name.ilike("%gobelet%"))
         .order_by(Product.name, Variant.size_l)
         .all()
     )
-    rules_by_vid = {r.variant_id: r for r in ReorderRule.query.all()}
+    rules_by_vid = {r.variant_id: r for r in ReorderRule.query_all()} if hasattr(ReorderRule, "query_all") else {r.variant_id: r for r in ReorderRule.query.all()}
     rows = []
     for v in variants:
         inv = get_or_create_inventory(v.id)
@@ -143,7 +147,8 @@ def compute_reorder_alerts():
       .product (Product), .variant (Variant), .qty, .min_qty, .need
     Compatible avec ui.alerts_list(alerts).
     """
-    rules_by_vid = {r.variant_id: int(r.min_qty or 0) for r in ReorderRule.query.all()}
+    rules = ReorderRule.query.all()
+    rules_by_vid = {r.variant_id: int(r.min_qty or 0) for r in rules}
     if not rules_by_vid:
         return []
     alerts: List[SimpleNamespace] = []
@@ -163,7 +168,6 @@ def compute_reorder_alerts():
                 min_qty=int(min_qty),
                 need=need,
             ))
-    # les plus urgents d’abord
     alerts.sort(key=lambda a: (-a.need, a.product.name or "", a.variant.size_l or 0))
     return alerts
 
@@ -229,6 +233,7 @@ def summarize_totals(cards: List[Card]) -> Dict[str, float]:
         co2=sum(c.equipment.co2 for c in cards),
         comptoir=sum(c.equipment.comptoir for c in cards),
         tonnelle=sum(c.equipment.tonnelle for c in cards),
+        ecocup=sum(c.equipment.ecocup for c in cards),
     )
 
 
