@@ -73,4 +73,92 @@ def effective_price(m: Movement, v: Variant) -> Optional[float]:
 
 def is_ecocup_product(product_name: Optional[str]) -> bool:
     if not product_name:
-        return Fa
+        return False
+    name = product_name.strip().lower()
+    # tolère "ecocup", "éco cup", "gobelet consigné", etc.
+    return ("ecocup" in name) or ("éco" in name and "cup" in name) or ("gobelet" in name)
+
+
+def effective_deposit(m: Movement, product_name: Optional[str]) -> float:
+    """
+    Retourne la consigne effective pour la ligne:
+      - si la consigne est saisie sur le mouvement => on l'utilise
+      - sinon: 1,00 € si produit Ecocup ; 30,00 € sinon (fûts)
+    """
+    if m.deposit_per_keg is not None:
+        try:
+            return float(m.deposit_per_keg)
+        except Exception:
+            pass
+    if is_ecocup_product(product_name):
+        return float(DEFAULT_ECOCUP_DEPOSIT)
+    return float(DEFAULT_KEG_DEPOSIT)
+
+
+# --- Requêtes composées ---
+def client_movements_full(client_id: int):
+    q = (
+        db.session.query(Movement, Variant, Product)
+        .join(Variant, Movement.variant_id == Variant.id)
+        .join(Product, Variant.product_id == Product.id)
+        .filter(Movement.client_id == client_id)
+        .order_by(Movement.created_at.desc(), Movement.id.desc())
+    )
+    return q.all()
+
+
+def summarize_client_detail(c: Client) -> Dict:
+    rows = []
+    beer_eur = 0.0
+    deposit_eur = 0.0
+    equipment = Equipment()
+    liters_out_cum = 0.0
+
+    for m, v, p in client_movements_full(c.id):
+        price = effective_price(m, v) or 0.0
+        dep = effective_deposit(m, getattr(p, "name", None))
+        eq = parse_equipment(m.notes)
+
+        if m.type == "OUT":
+            beer_eur += (m.qty or 0) * price
+            deposit_eur += (m.qty or 0) * dep
+            liters_out_cum += (m.qty or 0) * (getattr(v, "size_l", 0) or 0)
+            combine_equipment(equipment, eq, +1)
+        elif m.type in {"IN", "DEFECT", "FULL"}:
+            if m.type == "IN":
+                combine_equipment(equipment, eq, -1)
+        else:
+            pass
+
+        rows.append(dict(
+            id=m.id,
+            date=m.created_at,
+            type=m.type,
+            product=p.name,
+            size_l=getattr(v, "size_l", None),
+            qty=m.qty,
+            unit_price_ttc=price,
+            deposit_per_keg=dep,
+            notes=m.notes,
+        ))
+
+    sums = dict(
+        db.session.query(Movement.type, func.coalesce(func.sum(Movement.qty), 0))
+        .filter(Movement.client_id == c.id)
+        .group_by(Movement.type)
+        .all()
+    )
+    total_out = int(sums.get("OUT", 0))
+    total_in = int(sums.get("IN", 0))
+    total_def = int(sums.get("DEFECT", 0))
+    total_full = int(sums.get("FULL", 0))
+    kegs = total_out - (total_in + total_def + total_full)
+
+    return dict(
+        rows=rows,
+        kegs=kegs,
+        beer_eur=round(beer_eur, 2),
+        deposit_eur=round(deposit_eur, 2),
+        equipment=equipment,
+        liters_out_cum=round(liters_out_cum, 2),
+    )
