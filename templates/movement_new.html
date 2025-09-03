@@ -14,19 +14,9 @@
       {% endif %}
       {% for c in clients %}
         {% if not current_client or c.id != current_client.id %}
-          <option value="{{ c.id }}">{{ c.name }}</option>
+        <option value="{{ c.id }}">{{ c.name }}</option>
         {% endif %}
       {% endfor %}
-    </select>
-  </div>
-
-  <!-- Type -->
-  <div class="col-md-3">
-    <label class="form-label">Type</label>
-    <select name="type" class="form-select" required>
-      <option value="OUT">Sortie (livraison)</option>
-      <option value="IN">Reprise</option>
-      <option value="DEFECT">Défectueux</option>
     </select>
   </div>
 
@@ -36,40 +26,56 @@
     <input type="datetime-local" name="created_at" class="form-control" required>
   </div>
 
-  <!-- Variante -->
+  <!-- Variante (inclut les Ecocups si présents en catalogue) -->
   <div class="col-md-8">
     <label class="form-label">Produit / Variante</label>
     <select name="variant_id" class="form-select" required>
       {% for v in variants %}
         <option value="{{ v.id }}">
-          {{ v.product.name }} — {{ v.size_l }} L{% if v.price_ttc is not none %} ({{ '%.2f'|format(v.price_ttc) }} € TTC){% endif %}
+          {{ v.product.name }}{% if v.size_l %} — {{ v.size_l }} L{% endif %}
+          {% if v.price_ttc is not none %} ({{ '%.2f'|format(v.price_ttc) }} € TTC){% endif %}
         </option>
       {% endfor %}
+    </select>
+    <div class="form-text">
+      ⚠️ Pour les <strong>Ecocups</strong>, la consigne par défaut est <strong>1,00 €</strong> par gobelet (modifiable
+      champ “Consigne”). Pour les fûts, la consigne par défaut reste <strong>30,00 €</strong> par fût.
+    </div>
+  </div>
+
+  <!-- Type -->
+  <div class="col-md-4">
+    <label class="form-label">Type</label>
+    <select name="type" class="form-select" required>
+      <option value="OUT">Livraison</option>
+      <option value="IN">Reprise</option>
+      <option value="DEFECT">Défectueux</option>
+      <option value="FULL">Retour plein</option>
     </select>
   </div>
 
   <!-- Quantité -->
   <div class="col-md-4">
-    <label class="form-label">Quantité (fûts)</label>
-    <input type="number" name="qty" class="form-control" min="1" step="1" value="1" required>
+    <label class="form-label">Quantité</label>
+    <input type="number" name="qty" class="form-control" min="1" value="1" required>
   </div>
 
-  <!-- Prix unitaire TTC -->
+  <!-- Prix TTC -->
   <div class="col-md-4">
-    <label class="form-label">Prix unitaire TTC (€) <span class="text-muted">(optionnel)</span></label>
+    <label class="form-label">Prix TTC par unité (€) <span class="text-muted">(optionnel)</span></label>
     <input type="number" name="unit_price_ttc" class="form-control" step="0.01" min="0">
   </div>
 
-  <!-- Consigne / fût -->
+  <!-- Consigne -->
   <div class="col-md-4">
-    <label class="form-label">Consigne par fût (€) <span class="text-muted">(optionnel)</span></label>
-    <input type="number" name="deposit_per_keg" class="form-control" step="0.01" min="0">
+    <label class="form-label">Consigne par unité (€) <span class="text-muted">(optionnel)</span></label>
+    <input type="number" name="deposit_per_keg" class="form-control" step="0.01" min="0" placeholder="auto: 30,00 (fût) · 1,00 (ecocup)">
   </div>
 
-  <!-- Note / Matériel -->
+  <!-- Note / Matériel (prêts) -->
   <div class="col-12">
-    <label class="form-label">Note / Matériel</label>
-    <textarea name="notes" class="form-control" rows="3" placeholder="Ex : tireuse=1;co2=0;comptoir=0;tonnelle=0"></textarea>
+    <label class="form-label">Note / Matériel (optionnel)</label>
+    <textarea name="notes" class="form-control" rows="3" placeholder="Ex : tireuse=1;co2=0;comptoir=0;tonnelle=0;ecocup=100"></textarea>
   </div>
 
   <div class="col-12 d-flex gap-2">
