@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, date, time
 from flask import Flask, render_template, request, redirect, url_for, flash, session, Response
-from sqlalchemy import func
+from sqlalchemy import func, and_
 
 from models import db, Client, Product, Variant, Movement, ReorderRule
 from seed import seed_if_empty
@@ -132,14 +132,38 @@ def create_app():
             litres_out_cum=view.get("liters_out_cum", 0.0),
         )
 
+    # ---------- Filtre robuste pour masquer “ecocup lavage/perdu” ----------
+    def _hide_ecocup_maintenance(query):
+        """
+        Masque tous les produits dont le nom contient (ecocup|eco cup|gobelet)
+        ET (lavage|perdu|perte|wash|clean).
+        Utilise un LIKE case-insensible via lower() pour compatibilité max.
+        """
+        name_lc = func.lower(Product.name)
+        is_cup = (
+            name_lc.like("%ecocup%")
+            | name_lc.like("%eco cup%")
+            | name_lc.like("%gobelet%")
+        )
+        is_maintenance = (
+            name_lc.like("%lavage%")
+            | name_lc.like("%perdu%")
+            | name_lc.like("%perte%")
+            | name_lc.like("%wash%")
+            | name_lc.like("%clean%")
+        )
+        exclude = and_(is_cup, is_maintenance)
+        return query.filter(~exclude)
+
     @app.route("/catalog")
     def catalog():
-        variants = (
+        base_q = (
             db.session.query(Variant)
             .join(Product, Variant.product_id == Product.id)
             .order_by(Product.name, Variant.size_l)
-            .all()
         )
+        base_q = _hide_ecocup_maintenance(base_q)  # ⬅️ masque nettoyage/perdu
+        variants = base_q.all()
         return render_template("catalog.html", variants=variants)
 
     # ------------- Saisie (wizard) -------------
@@ -215,13 +239,18 @@ def create_app():
                 session.modified = True
                 return redirect(url_for("movement_wizard", step=3))
 
-            # GET : liste de variantes
+            # GET : liste de variantes (en masquant ecocup lavage/perdu)
             clients = Client.query.order_by(Client.name.asc()).all()
+
             base_q = (
                 db.session.query(Variant, Product)
                 .join(Product, Variant.product_id == Product.id)
                 .order_by(Product.name, Variant.size_l)
             )
+            # masque “ecocup maintenance”
+            base_q = _hide_ecocup_maintenance(base_q)
+
+            # Si c'est un retour (IN), limiter aux variantes réellement en jeu + matériel seul
             if wiz.get("type") == "IN" and wiz.get("client_id"):
                 open_map = _open_kegs_by_variant(wiz["client_id"])
                 allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
@@ -231,11 +260,13 @@ def create_app():
                         db.session.query(Variant.id)
                         .join(Product, Variant.product_id == Product.id)
                         .filter(
-                            (
-                                Product.name.ilike("%matériel%seul%")
-                                | Product.name.ilike("%materiel%seul%")
-                                | Product.name.ilike("%Matériel seul%")
-                                | Product.name.ilike("%Materiel seul%")
+                            and_(
+                                func.lower(Product.name).like("%matériel%"),
+                                func.lower(Product.name).like("%seul%")
+                            )
+                            | and_(
+                                func.lower(Product.name).like("%materiel%"),
+                                func.lower(Product.name).like("%seul%")
                             )
                         )
                         .all()
@@ -325,7 +356,7 @@ def create_app():
                         continue
 
                     pname = (v.product.name if v and v.product else "") or ""
-                    is_equipment_only = "matériel" in pname.lower() and "seul" in pname.lower()
+                    is_equipment_only = ("matériel" in pname.lower() or "materiel" in pname.lower()) and ("seul" in pname.lower())
                     if is_equipment_only:
                         qty_int = 0
                         up = 0.0
@@ -340,7 +371,7 @@ def create_app():
                         if mtype == "IN":
                             open_q = int(open_map.get(vid_int, 0))
                             if open_q <= 0 or qty_int > open_q:
-                                label = f"{v.product.name} — {v.size_l} L"
+                                label = f"{v.product.name} — {v.size_l} L" if v.size_l else f"{v.product.name}"
                                 violations.append((label, open_q))
                                 continue
 
