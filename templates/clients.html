@@ -14,7 +14,7 @@
         <thead>
           <tr>
             <th>Nom</th>
-            <th style="width:260px;"></th>
+            <th style="width:260px;" class="text-end">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -22,10 +22,8 @@
           <tr>
             <td>{{ c.name }}</td>
             <td class="text-end">
-              <a class="btn btn-sm btn-outline-primary"
-                 href="{{ url_for('client_detail', client_id=c.id) }}">Ouvrir</a>
-              <a class="btn btn-sm btn-outline-secondary"
-                 href="{{ url_for('client_edit', client_id=c.id) }}">Modifier</a>
+              <a class="btn btn-outline-secondary" href="{{ url_for('client_edit', client_id=c.id) }}">Modifier</a>
+              <a class="btn btn-primary" href="{{ url_for('client_detail', client_id=c.id) }}">Ouvrir</a>
             </td>
           </tr>
           {% else %}
