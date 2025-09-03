@@ -1,17 +1,25 @@
 {% extends "base.html" %}
-{% block title %}{{ client and 'Modifier' or 'Nouveau' }} client{% endblock %}
+
+{% block title %}{% if is_edit %}Modifier client{% else %}Nouveau client{% endif %}{% endblock %}
+
 {% block content %}
-<h1 class="h3">{{ client and 'Modifier' or 'Nouveau' }} client</h1>
+<h1 class="h3 mb-3">{% if is_edit %}Modifier client{% else %}Nouveau client{% endif %}</h1>
 <hr>
 
-<form method="post" class="card p-3">
-  <div class="mb-3">
+<form method="post" action="{% if is_edit %}{{ url_for('client_edit', client_id=client.id) }}{% else %}{{ url_for('client_new') }}{% endif %}" class="row g-3">
+  <div class="col-md-6">
     <label class="form-label">Nom</label>
-    <input type="text" name="name" class="form-control" value="{{ client and client.name or '' }}" required>
+    <input type="text" name="name" class="form-control" required
+           value="{{ request.form.get('name', (client.name if client else '')) }}">
   </div>
-  <div class="d-flex gap-2">
-    <button class="btn btn-primary" type="submit">Enregistrer</button>
-    <a class="btn btn-outline-secondary" href="{{ url_for('clients') }}">Annuler</a>
+
+  <div class="col-12 d-flex gap-2">
+    <button type="submit" class="btn btn-primary">{% if is_edit %}Enregistrer{% else %}Créer{% endif %}</button>
+    {% if is_edit %}
+      <a class="btn btn-outline-secondary" href="{{ url_for('client_detail', client_id=client.id) }}">Annuler</a>
+    {% else %}
+      <a class="btn btn-outline-secondary" href="{{ url_for('clients') }}">Annuler</a>
+    {% endif %}
   </div>
 </form>
 {% endblock %}
