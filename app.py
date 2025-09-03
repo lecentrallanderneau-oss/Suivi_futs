@@ -1,251 +1,441 @@
-@app.route("/movement/wizard", methods=["GET", "POST"])
-def movement_wizard():
-    # État du wizard en session
-    if "wiz" not in session:
-        session["wiz"] = {}
-    wiz = session["wiz"]
+import os
+from datetime import datetime, date, time
+from flask import Flask, render_template, request, redirect, url_for, flash, session, Response
+from sqlalchemy import func
 
-    # Étape courante (par défaut 1)
-    try:
-        step = int(request.args.get("step", 1))
-    except Exception:
-        step = 1
+from models import db, Client, Product, Variant, Movement, ReorderRule
+from seed import seed_if_empty
+import utils as U
 
-    # ---------- ÉTAPE 1 : choix client / type / date ----------
-    if step == 1:
-        if request.method == "POST":
-            wiz["client_id"] = request.form.get("client_id", type=int)
-            wiz["type"] = request.form.get("type")
-            wiz["date"] = request.form.get("date")  # AAAA-MM-JJ (optionnel)
-            session.modified = True
-            if not wiz.get("client_id") or not wiz.get("type"):
-                flash("Sélectionne un client et un type de mouvement.", "warning")
-                return render_template(
-                    "movement_wizard.html",
-                    step=1,
-                    clients=Client.query.order_by(Client.name.asc()).all(),
-                    rows=[],
-                    wiz=wiz,
-                )
-            return redirect(url_for("movement_wizard", step=2))
-        # GET
-        clients = Client.query.order_by(Client.name.asc()).all()
-        return render_template("movement_wizard.html", step=1, clients=clients, rows=[], wiz=wiz)
 
-    # ---------- ÉTAPE 2 : choix des produits/variantes ----------
-    if step == 2:
-        if request.method == "POST":
-            # Autoriser 'variant_id' (checkboxes) ou 'variant_ids' (fallback)
-            vids = request.form.getlist("variant_id") or request.form.getlist("variant_ids")
-            if not vids:
-                flash("Sélectionne au moins un produit.", "warning")
-                return redirect(url_for("movement_wizard", step=2))
-            try:
-                wiz["variant_ids"] = [int(v) for v in vids]
-            except Exception:
-                wiz["variant_ids"] = []
-            session.modified = True
-            return redirect(url_for("movement_wizard", step=3))
+def create_app():
+    app = Flask(__name__)
+    app.secret_key = os.environ.get("SECRET_KEY", "dev")
+    app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", "sqlite:///data.db")
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
 
-        # GET : liste de variantes
-        clients = Client.query.order_by(Client.name.asc()).all()
-        base_q = (
-            db.session.query(Variant, Product)
-            .join(Product, Variant.product_id == Product.id)
-            .order_by(Product.name, Variant.size_l)
+    with app.app_context():
+        db.create_all()
+        seed_if_empty()
+
+    # ----------------- Healthcheck -----------------
+    @app.route("/healthz", methods=["GET", "HEAD"])
+    def healthz():
+        return Response("ok", status=200, mimetype="text/plain")
+
+    # ----------------- Filtres Jinja -----------------
+    @app.template_filter("dt")
+    def fmt_dt(value):
+        if not value:
+            return ""
+        try:
+            return value.strftime("%d/%m/%Y")
+        except Exception:
+            return str(value)
+
+    @app.template_filter("eur")
+    def fmt_eur(v):
+        if v is None:
+            return "-"
+        return f"{v:,.2f} €".replace(",", " ").replace(".", ",")
+
+    @app.template_filter("signed_eur")
+    def fmt_signed_eur(v):
+        if v is None:
+            return "-"
+        s = "+" if v >= 0 else "−"
+        return f"{s}{abs(v):,.2f} €".replace(",", " ").replace(".", ",")
+
+    # ----------------- Helper : fûts “ouverts” par variante chez un client -----------------
+    def _open_kegs_by_variant(client_id: int):
+        out_rows = dict(
+            db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
+            .filter(Movement.client_id == client_id, Movement.type == "OUT")
+            .group_by(Movement.variant_id)
+            .all()
         )
-        if wiz.get("type") == "IN" and wiz.get("client_id"):
-            # Limiter aux variantes réellement en jeu chez ce client + “Matériel seul”
-            def _open_kegs_by_variant(client_id: int):
-                out_rows = dict(
-                    db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
-                    .filter(Movement.client_id == client_id, Movement.type == "OUT")
-                    .group_by(Movement.variant_id)
-                    .all()
-                )
-                back_rows = dict(
-                    db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
-                    .filter(Movement.client_id == client_id, Movement.type.in_(["IN", "DEFECT", "FULL"]))
-                    .group_by(Movement.variant_id)
-                    .all()
-                )
-                all_vids = set(out_rows) | set(back_rows)
-                return {vid: int(out_rows.get(vid, 0)) - int(back_rows.get(vid, 0)) for vid in all_vids}
+        back_rows = dict(
+            db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
+            .filter(Movement.client_id == client_id, Movement.type.in_(["IN", "DEFECT", "FULL"]))
+            .group_by(Movement.variant_id)
+            .all()
+        )
+        all_vids = set(out_rows) | set(back_rows)
+        return {vid: int(out_rows.get(vid, 0)) - int(back_rows.get(vid, 0)) for vid in all_vids}
 
-            open_map = _open_kegs_by_variant(wiz["client_id"])
-            allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
+    # ----------------- Pages -----------------
+    @app.route("/")
+    def index():
+        clients = Client.query.order_by(Client.name.asc()).all()
+        cards = [U.summarize_client_for_index(c) for c in clients]
+        totals = U.summarize_totals(cards)
+        alerts = U.compute_reorder_alerts()
+        return render_template("index.html", cards=cards, totals=totals, alerts=alerts)
 
-            equip_ids = set(
-                vid for (vid,) in (
-                    db.session.query(Variant.id)
-                    .join(Product, Variant.product_id == Product.id)
-                    .filter(
-                        (
-                            Product.name.ilike("%matériel%seul%")
-                            | Product.name.ilike("%materiel%seul%")
-                            | Product.name.ilike("%Matériel seul%")
-                            | Product.name.ilike("%Materiel seul%")
-                        )
-                    )
-                    .all()
-                )
-            )
+    @app.route("/clients")
+    def clients():
+        clients = Client.query.order_by(Client.name.asc()).all()
+        return render_template("clients.html", clients=clients)
 
-            final_ids = list(allowed_ids | equip_ids)
-            if final_ids:
-                base_q = base_q.filter(Variant.id.in_(final_ids))
-
-        rows = base_q.all()  # rows = list of (Variant, Product)
-        return render_template("movement_wizard.html", step=2, clients=clients, rows=rows, wiz=wiz)
-
-    # ---------- ÉTAPE 3 : saut direct vers 4 (pas d'écran intermédiaire) ----------
-    if step == 3:
-        # Optionnel : si tu as un écran de récap ici, rends-le; sinon on file à 4
-        return redirect(url_for("movement_wizard", step=4))
-
-    # ---------- ÉTAPE 4 : saisie quantités/prix/consignes + enregistrement ----------
-    if step == 4:
+    @app.route("/client/new", methods=["GET", "POST"])
+    def client_new():
         if request.method == "POST":
-            if (wiz.get("client_id") is None) or (wiz.get("type") is None):
-                flash("Informations incomplètes.", "warning")
-                return redirect(url_for("movement_wizard", step=1))
-
-            # Date finale
-            if wiz.get("date"):
-                try:
-                    y, m_, d2 = [int(x) for x in wiz["date"].split("-")]
-                    created_at = datetime.combine(date(y, m_, d2), time(hour=12))
-                except Exception:
-                    created_at = U.now_utc()
-            else:
-                created_at = U.now_utc()
-
-            variant_ids = request.form.getlist("variant_id")
-            qtys = request.form.getlist("qty")
-            unit_prices = request.form.getlist("unit_price_ttc")
-            deposits = request.form.getlist("deposit_per_keg")
-            notes = request.form.get("notes") or None
-
-            # Matériel prêté/repris → notes
-            t = request.form.get("eq_tireuse", type=int)
-            c2 = request.form.get("eq_co2", type=int)
-            cpt = request.form.get("eq_comptoir", type=int)
-            ton = request.form.get("eq_tonnelle", type=int)
-            equip_parts = []
-            if t:   equip_parts.append(f"tireuse={t}")
-            if c2:  equip_parts.append(f"co2={c2}")
-            if cpt: equip_parts.append(f"comptoir={cpt}")
-            if ton: equip_parts.append(f"tonnelle={ton}")
-            notes = (";".join(equip_parts) + (";" + notes if notes else "")) or None
-
-            client_id = int(wiz["client_id"])
-            mtype = wiz["type"]
-
-            # Contrôle des retours vs enjeu
-            def _open_kegs_by_variant(client_id: int):
-                out_rows = dict(
-                    db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
-                    .filter(Movement.client_id == client_id, Movement.type == "OUT")
-                    .group_by(Movement.variant_id)
-                    .all()
-                )
-                back_rows = dict(
-                    db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
-                    .filter(Movement.client_id == client_id, Movement.type.in_(["IN", "DEFECT", "FULL"]))
-                    .group_by(Movement.variant_id)
-                    .all()
-                )
-                all_vids = set(out_rows) | set(back_rows)
-                return {vid: int(out_rows.get(vid, 0)) - int(back_rows.get(vid, 0)) for vid in all_vids}
-
-            violations = []
-            open_map = _open_kegs_by_variant(client_id) if mtype == "IN" else {}
-
-            for i, vid in enumerate(variant_ids):
-                try:
-                    vid_int = int(vid)
-                except Exception:
-                    continue
-
-                try:
-                    qty_int = int(qtys[i])
-                except Exception:
-                    qty_int = 0
-
-                up = None
-                if i < len(unit_prices) and unit_prices[i] not in ("", None):
-                    try:
-                        up = float(unit_prices[i])
-                    except Exception:
-                        up = None
-
-                dep = None
-                if i < len(deposits) and deposits[i] not in ("", None):
-                    try:
-                        dep = float(deposits[i])
-                    except Exception:
-                        dep = None
-
-                v = Variant.query.get(vid_int)
-                if not v:
-                    continue
-
-                pname = (v.product.name if v and v.product else "") or ""
-                is_equipment_only = "matériel" in pname.lower() and "seul" in pname.lower()
-                if is_equipment_only:
-                    qty_int = 0
-                    up = 0.0
-                    dep = 0.0
-                else:
-                    if up is None and (v.price_ttc is not None):
-                        up = v.price_ttc
-                    if dep is None:
-                        # Ecocup = 1 €, sinon 30 €
-                        dep = U.default_deposit_for_product(v.product)
-
-                    if mtype == "IN":
-                        open_q = int(open_map.get(vid_int, 0))
-                        if open_q <= 0 or qty_int > open_q:
-                            label = f"{v.product.name} — {v.size_l} L"
-                            violations.append((label, open_q))
-                            continue
-
-                mv = Movement(
-                    client_id=client_id,
-                    variant_id=vid_int,
-                    type=mtype,
-                    qty=qty_int,
-                    unit_price_ttc=up,
-                    deposit_per_keg=dep,
-                    notes=notes,
-                    created_at=created_at,
-                )
-                db.session.add(mv)
-
-                # MAJ inventaire bar (OUT / FULL)
-                inv = U.get_or_create_inventory(vid_int)
-                if mtype == "OUT":
-                    inv.qty = (inv.qty or 0) - qty_int
-                elif mtype == "FULL":
-                    inv.qty = (inv.qty or 0) + qty_int
-
-            if violations:
-                text = "Certains retours dépassent l’enjeu autorisé : " + ", ".join(
-                    f"{lab} (max {q})" for lab, q in violations
-                )
-            #    flash(text, "warning")
-            #    return redirect(url_for("movement_wizard", step=2))
-            # ↑ si tu veux bloquer, dé-commente les deux lignes ci-dessus.
-
+            name = request.form.get("name", "").strip()
+            if not name:
+                flash("Nom obligatoire.", "warning")
+                return render_template("client_form.html", client=None, is_edit=False)
+            c = Client(name=name)
+            db.session.add(c)
             db.session.commit()
-            flash("Saisie enregistrée.", "success")
-            session.pop("wiz", None)
-            return redirect(url_for("client_detail", client_id=client_id))
+            flash("Client créé.", "success")
+            return redirect(url_for("clients"))
+        return render_template("client_form.html", client=None, is_edit=False)
 
-        # GET -> afficher le formulaire de l’étape 4 (on charge les variantes sélectionnées)
-        selected = []
-        for vid in wiz.get("variant_ids", []):
-            v = Variant.query.get(vid)
-            if v:
-                selected.append((v, v.product))
-        return render_template("movement_wizard.html", step=4, wiz=wiz, selected=selected)
+    # ✅ Route d’édition (manquante auparavant)
+    @app.route("/client/<int:client_id>/edit", methods=["GET", "POST"])
+    def client_edit(client_id):
+        c = Client.query.get_or_404(client_id)
+        if request.method == "POST":
+            name = request.form.get("name", "").strip()
+            if not name:
+                flash("Nom obligatoire.", "warning")
+                return render_template("client_form.html", client=c, is_edit=True)
+            c.name = name
+            db.session.commit()
+            flash("Client modifié.", "success")
+            return redirect(url_for("clients"))
+        return render_template("client_form.html", client=c, is_edit=True)
+
+    @app.route("/client/<int:client_id>")
+    def client_detail(client_id):
+        c = Client.query.get_or_404(client_id)
+        view = U.summarize_client_detail(c)
+
+        movements = (
+            db.session.query(Movement, Variant, Product)
+            .join(Variant, Movement.variant_id == Variant.id)
+            .join(Product, Variant.product_id == Product.id)
+            .filter(Movement.client_id == client_id)
+            .order_by(Movement.created_at.desc(), Movement.id.desc())
+            .all()
+        )
+
+        return render_template(
+            "client_detail.html",
+            client=c,
+            view=view,
+            movements=movements,
+            beer_billed_cum=view["beer_eur"],
+            deposit_in_play=view["deposit_eur"],
+            equipment_totals=view["equipment"],
+            liters_out_cum=view.get("liters_out_cum", 0.0),
+            litres_out_cum=view.get("liters_out_cum", 0.0),
+        )
+
+    @app.route("/catalog")
+    def catalog():
+        variants = (
+            db.session.query(Variant)
+            .join(Product, Variant.product_id == Product.id)
+            # Ecocup visibles dans le catalogue
+            .order_by(Product.name, Variant.size_l)
+            .all()
+        )
+        return render_template("catalog.html", variants=variants)
+
+    # ------------- Saisie (wizard) -------------
+    @app.route("/movement/new", methods=["GET"])
+    def movement_new():
+        return redirect(url_for("movement_wizard"))
+
+    @app.route("/movement/wizard", methods=["GET", "POST"])
+    def movement_wizard():
+        # État du wizard en session
+        if "wiz" not in session:
+            session["wiz"] = {}
+        wiz = session["wiz"]
+
+        # Étape courante (par défaut 1)
+        try:
+            step = int(request.args.get("step", 1))
+        except Exception:
+            step = 1
+
+        # ---------- ÉTAPE 1 : choix client / type / date ----------
+        if step == 1:
+            if request.method == "POST":
+                wiz["client_id"] = request.form.get("client_id", type=int)
+                wiz["type"] = request.form.get("type")
+                wiz["date"] = request.form.get("date")  # AAAA-MM-JJ (optionnel)
+                session.modified = True
+                if not wiz.get("client_id") or not wiz.get("type"):
+                    flash("Sélectionne un client et un type de mouvement.", "warning")
+                    return render_template(
+                        "movement_wizard.html",
+                        step=1,
+                        clients=Client.query.order_by(Client.name.asc()).all(),
+                        rows=[],
+                        wiz=wiz,
+                    )
+                return redirect(url_for("movement_wizard", step=2))
+            # GET
+            clients = Client.query.order_by(Client.name.asc()).all()
+            return render_template("movement_wizard.html", step=1, clients=clients, rows=[], wiz=wiz)
+
+        # ---------- ÉTAPE 2 : choix des produits/variantes ----------
+        if step == 2:
+            if request.method == "POST":
+                # Autoriser 'variant_id' (checkboxes) ou 'variant_ids' (fallback)
+                vids = request.form.getlist("variant_id") or request.form.getlist("variant_ids")
+                if not vids:
+                    flash("Sélectionne au moins un produit.", "warning")
+                    return redirect(url_for("movement_wizard", step=2))
+                try:
+                    wiz["variant_ids"] = [int(v) for v in vids]
+                except Exception:
+                    wiz["variant_ids"] = []
+                session.modified = True
+                return redirect(url_for("movement_wizard", step=3))
+
+            # GET : liste de variantes
+            clients = Client.query.order_by(Client.name.asc()).all()
+            base_q = (
+                db.session.query(Variant, Product)
+                .join(Product, Variant.product_id == Product.id)
+                .order_by(Product.name, Variant.size_l)
+            )
+            if wiz.get("type") == "IN" and wiz.get("client_id"):
+                # Limiter aux variantes réellement en jeu chez ce client + “Matériel seul”
+                open_map = _open_kegs_by_variant(wiz["client_id"])
+                allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
+
+                equip_ids = set(
+                    vid for (vid,) in (
+                        db.session.query(Variant.id)
+                        .join(Product, Variant.product_id == Product.id)
+                        .filter(
+                            (
+                                Product.name.ilike("%matériel%seul%")
+                                | Product.name.ilike("%materiel%seul%")
+                                | Product.name.ilike("%Matériel seul%")
+                                | Product.name.ilike("%Materiel seul%")
+                            )
+                        )
+                        .all()
+                    )
+                )
+
+                final_ids = list(allowed_ids | equip_ids)
+                if final_ids:
+                    base_q = base_q.filter(Variant.id.in_(final_ids))
+
+            rows = base_q.all()  # rows = list of (Variant, Product)
+            return render_template("movement_wizard.html", step=2, clients=clients, rows=rows, wiz=wiz)
+
+        # ---------- ÉTAPE 3 : saut direct vers 4 (pas d'écran intermédiaire) ----------
+        if step == 3:
+            return redirect(url_for("movement_wizard", step=4))
+
+        # ---------- ÉTAPE 4 : saisie quantités/prix/consignes + enregistrement ----------
+        if step == 4:
+            if request.method == "POST":
+                if (wiz.get("client_id") is None) or (wiz.get("type") is None):
+                    flash("Informations incomplètes.", "warning")
+                    return redirect(url_for("movement_wizard", step=1))
+
+                # Date finale
+                if wiz.get("date"):
+                    try:
+                        y, m_, d2 = [int(x) for x in wiz["date"].split("-")]
+                        created_at = datetime.combine(date(y, m_, d2), time(hour=12))
+                    except Exception:
+                        created_at = U.now_utc()
+                else:
+                    created_at = U.now_utc()
+
+                variant_ids = request.form.getlist("variant_id")
+                qtys = request.form.getlist("qty")
+                unit_prices = request.form.getlist("unit_price_ttc")
+                deposits = request.form.getlist("deposit_per_keg")
+                notes = request.form.get("notes") or None
+
+                # Matériel prêté/repris → notes
+                t = request.form.get("eq_tireuse", type=int)
+                c2 = request.form.get("eq_co2", type=int)
+                cpt = request.form.get("eq_comptoir", type=int)
+                ton = request.form.get("eq_tonnelle", type=int)
+                equip_parts = []
+                if t:   equip_parts.append(f"tireuse={t}")
+                if c2:  equip_parts.append(f"co2={c2}")
+                if cpt: equip_parts.append(f"comptoir={cpt}")
+                if ton: equip_parts.append(f"tonnelle={ton}")
+                notes = (";".join(equip_parts) + (";" + notes if notes else "")) or None
+
+                client_id = int(wiz["client_id"])
+                mtype = wiz["type"]
+
+                # Contrôle des retours vs enjeu
+                violations = []
+                open_map = _open_kegs_by_variant(client_id) if mtype == "IN" else {}
+
+                for i, vid in enumerate(variant_ids):
+                    try:
+                        vid_int = int(vid)
+                    except Exception:
+                        continue
+
+                    try:
+                        qty_int = int(qtys[i])
+                    except Exception:
+                        qty_int = 0
+
+                    up = None
+                    if i < len(unit_prices) and unit_prices[i] not in ("", None):
+                        try:
+                            up = float(unit_prices[i])
+                        except Exception:
+                            up = None
+
+                    dep = None
+                    if i < len(deposits) and deposits[i] not in ("", None):
+                        try:
+                            dep = float(deposits[i])
+                        except Exception:
+                            dep = None
+
+                    v = Variant.query.get(vid_int)
+                    if not v:
+                        continue
+
+                    pname = (v.product.name if v and v.product else "") or ""
+                    is_equipment_only = "matériel" in pname.lower() and "seul" in pname.lower()
+                    if is_equipment_only:
+                        qty_int = 0
+                        up = 0.0
+                        dep = 0.0
+                    else:
+                        if up is None and (v.price_ttc is not None):
+                            up = v.price_ttc
+                        if dep is None:
+                            # Ecocup = 1 €, sinon 30 €
+                            dep = U.default_deposit_for_product(v.product)
+
+                        if mtype == "IN":
+                            open_q = int(open_map.get(vid_int, 0))
+                            if open_q <= 0 or qty_int > open_q:
+                                label = f"{v.product.name} — {v.size_l} L"
+                                violations.append((label, open_q))
+                                continue
+
+                    mv = Movement(
+                        client_id=client_id,
+                        variant_id=vid_int,
+                        type=mtype,
+                        qty=qty_int,
+                        unit_price_ttc=up,
+                        deposit_per_keg=dep,
+                        notes=notes,
+                        created_at=created_at,
+                    )
+                    db.session.add(mv)
+
+                    # MAJ inventaire bar (OUT / FULL)
+                    inv = U.get_or_create_inventory(vid_int)
+                    if mtype == "OUT":
+                        inv.qty = (inv.qty or 0) - qty_int
+                    elif mtype == "FULL":
+                        inv.qty = (inv.qty or 0) + qty_int
+
+                if violations:
+                    text = "Certains retours dépassent l’enjeu autorisé : " + ", ".join(
+                        f"{lab} (max {q})" for lab, q in violations
+                    )
+                    flash(text, "warning")
+                    return redirect(url_for("movement_wizard", step=2))
+
+                db.session.commit()
+                flash("Saisie enregistrée.", "success")
+                session.pop("wiz", None)
+                return redirect(url_for("client_detail", client_id=client_id))
+
+            # GET -> afficher le formulaire de l’étape 4 (on charge les variantes sélectionnées)
+            selected = []
+            for vid in wiz.get("variant_ids", []):
+                v = Variant.query.get(vid)
+                if v:
+                    selected.append((v, v.product))
+            return render_template("movement_wizard.html", step=4, wiz=wiz, selected=selected)
+
+    # ---- Suppression mouvement ----
+    @app.route("/movement/<int:movement_id>/confirm-delete", methods=["GET"])
+    def movement_confirm_delete(movement_id):
+        m = Movement.query.get_or_404(movement_id)
+        return render_template("movement_confirm_delete.html", m=m)
+
+    @app.route("/movement/<int:movement_id>/delete", methods=["POST"])
+    def movement_delete(movement_id):
+        m = Movement.query.get_or_404(movement_id)
+        client_id = m.client_id
+
+        # Rétablir l’inventaire
+        if m.qty and m.variant_id:
+            inv = U.get_or_create_inventory(m.variant_id)
+            if m.type == "OUT":
+                inv.qty = (inv.qty or 0) + (m.qty or 0)
+            elif m.type == "FULL":
+                inv.qty = (inv.qty or 0) - (m.qty or 0)
+
+        db.session.delete(m)
+        db.session.commit()
+        flash("Saisie supprimée.", "success")
+        return redirect(url_for("client_detail", client_id=client_id))
+
+    # ---- Stock ----
+    @app.route("/stock", methods=["GET", "POST"])
+    def stock():
+        if request.method == "POST":
+            changed = 0
+            for k, v in request.form.items():
+                if k.startswith("qty_"):
+                    vid = int(k.split("_", 1)[1])
+                    inv = U.get_or_create_inventory(vid)
+                    inv.qty = int(v or 0)
+                    changed += 1
+                elif k.startswith("min_"):
+                    vid = int(k.split("_", 1)[1])
+                    rr = ReorderRule.query.filter_by(variant_id=vid).first()
+                    if not rr:
+                        rr = ReorderRule(variant_id=vid, min_qty=int(v or 0))
+                        db.session.add(rr)
+                    else:
+                        rr.min_qty = int(v or 0)
+                    changed += 1
+            db.session.commit()
+            flash(f"Inventaire enregistré ({changed} mise(s) à jour).", "success")
+            return redirect(url_for("stock"))
+
+        rows = U.get_stock_items()
+        alerts = U.compute_reorder_alerts()
+        return render_template("stock.html", rows=rows, alerts=alerts)
+
+    @app.route("/product/<int:variant_id>")
+    def product_variant(variant_id):
+        v = Variant.query.get_or_404(variant_id)
+        return render_template("product.html", variant=v, product=v.product)
+
+    @app.errorhandler(404)
+    def not_found(e):
+        return render_template("404.html"), 404
+
+    @app.errorhandler(500)
+    def server_error(e):
+        return render_template("500.html"), 500
+
+    return app
+
+
+app = create_app()
+
+if __name__ == "__main__":
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
