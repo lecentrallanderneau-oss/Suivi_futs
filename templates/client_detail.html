@@ -6,7 +6,6 @@
 {% block content %}
 <h1 class="h3 mb-3">{{ client.name }}</h1>
 
-{# --- Bandeau récap --- #}
 <div class="row g-3 mb-3">
   <div class="col-6 col-md-3">
     {{ ui.stat_card("Fûts en jeu", view.kegs) }}
@@ -22,19 +21,18 @@
   </div>
 </div>
 
-{# --- Matériel prêté (badges) --- #}
 <div class="mb-3">
   {{ ui.equipment_badges(view.equipment) }}
 </div>
 
 <hr class="my-3">
 
-{# --- Historique des mouvements --- #}
 <div class="card">
   <div class="card-body">
     <div class="d-flex align-items-center justify-content-between mb-2">
       <div class="h5 mb-0">Historique</div>
-      <a class="btn btn-sm btn-primary" href="{{ url_for('movement_wizard') }}?step=1">Nouveau mouvement</a>
+      <!-- ✅ Passe l'id client au wizard pour sauter la sélection -->
+      <a class="btn btn-sm btn-primary" href="{{ url_for('movement_wizard', step=1, client_id=client.id) }}">Nouveau mouvement</a>
     </div>
 
     <div class="table-responsive">
@@ -52,7 +50,6 @@
           </tr>
         </thead>
         <tbody>
-        {# mouvements est une liste de tuples (Movement, Variant, Product) #}
         {% for m, v, p in movements %}
           {% set pname = (p.name if p is defined and p else "") %}
           {% set size_l = (v.size_l if v is defined and v else None) %}
@@ -67,23 +64,11 @@
               {% elif m.type == 'FULL' %}Retour plein
               {% else %}{{ m.type }}{% endif %}
             </td>
-            <td>
-              {{ pname }}
-            </td>
-            <td>
-              {% if size_l %}{{ ('%.1f'|format(size_l)).rstrip('0').rstrip('.') }} L{% else %}—{% endif %}
-            </td>
+            <td>{{ pname }}</td>
+            <td>{% if size_l %}{{ ('%.1f'|format(size_l)).rstrip('0').rstrip('.') }} L{% else %}—{% endif %}</td>
             <td>{{ (m.qty or 0)|int }}</td>
-            <td>
-              {% if unit_price is not none %}
-                {{ ('%.2f'|format(unit_price)).replace('.', ',') }} €
-              {% else %}—{% endif %}
-            </td>
-            <td>
-              {% if deposit is not none %}
-                {{ ('%.2f'|format(deposit)).replace('.', ',') }} €
-              {% else %}—{% endif %}
-            </td>
+            <td>{% if unit_price is not none %}{{ ('%.2f'|format(unit_price)).replace('.', ',') }} €{% else %}—{% endif %}</td>
+            <td>{% if deposit is not none %}{{ ('%.2f'|format(deposit)).replace('.', ',') }} €{% else %}—{% endif %}</td>
             <td class="text-end">
               <a class="btn btn-sm btn-outline-danger"
                  href="{{ url_for('movement_confirm_delete', movement_id=m.id) }}">Supprimer</a>
