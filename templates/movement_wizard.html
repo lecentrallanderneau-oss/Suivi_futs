@@ -7,15 +7,27 @@
 {# ====== ÉTAPE 1 ====== #}
 {% if step == 1 %}
 <form method="post" action="{{ url_for('movement_wizard', step=1) }}" class="row g-3">
-  <div class="col-md-6">
-    <label class="form-label">Client</label>
-    <select name="client_id" class="form-select" required>
-      <option value="" selected disabled>Choisir…</option>
-      {% for c in clients %}
-        <option value="{{ c.id }}">{{ c.name }}</option>
-      {% endfor %}
-    </select>
-  </div>
+
+  {% if prefill_client %}
+    <div class="col-12">
+      <label class="form-label">Client</label>
+      <div class="form-control-plaintext">
+        <strong>{{ prefill_client.name }}</strong>
+        <a class="ms-2 small" href="{{ url_for('movement_wizard', step=1, clear_client=1) }}">(changer)</a>
+      </div>
+    </div>
+  {% else %}
+    <div class="col-md-6">
+      <label class="form-label">Client</label>
+      <select name="client_id" class="form-select" required>
+        <option value="" selected disabled>Choisir…</option>
+        {% for c in clients %}
+          <option value="{{ c.id }}">{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  {% endif %}
+
   <div class="col-md-3">
     <label class="form-label">Type</label>
     <select name="type" class="form-select" required>
@@ -39,6 +51,9 @@
 {# ====== ÉTAPE 2 ====== #}
 {% if step == 2 %}
 <form method="post" action="{{ url_for('movement_wizard', step=2) }}">
+  {% if prefill_client %}
+  <div class="mb-2 text-muted">Client : <strong>{{ prefill_client.name }}</strong></div>
+  {% endif %}
   <div class="table-responsive">
     <table class="table align-middle">
       <thead>
@@ -51,13 +66,9 @@
       <tbody>
       {% for v, p in rows %}
         <tr>
-          <td>
-            <input class="form-check-input" type="checkbox" name="variant_id" value="{{ v.id }}">
-          </td>
+          <td><input class="form-check-input" type="checkbox" name="variant_id" value="{{ v.id }}"></td>
           <td>{{ p.name }}</td>
-          <td>
-            {% if v.size_l %}{{ ('%.1f'|format(v.size_l)).rstrip('0').rstrip('.') }} L{% else %}—{% endif %}
-          </td>
+          <td>{% if v.size_l %}{{ ('%.1f'|format(v.size_l)).rstrip('0').rstrip('.') }} L{% else %}—{% endif %}</td>
         </tr>
       {% else %}
         <tr><td colspan="3" class="text-muted text-center">Aucune variante.</td></tr>
@@ -75,6 +86,10 @@
 {# ====== ÉTAPE 4 ====== #}
 {% if step == 4 %}
 <form method="post" action="{{ url_for('movement_wizard', step=4) }}">
+  {% if prefill_client %}
+  <div class="mb-2 text-muted">Client : <strong>{{ prefill_client.name }}</strong></div>
+  {% endif %}
+
   {% if selected and selected|length > 0 %}
   <div class="table-responsive mb-3">
     <table class="table align-middle">
@@ -95,20 +110,12 @@
             <input type="hidden" name="variant_id" value="{{ v.id }}">
             {{ p.name }}
           </td>
-          <td>
-            {% if v.size_l %}{{ ('%.1f'|format(v.size_l)).rstrip('0').rstrip('.') }} L{% else %}—{% endif %}
-          </td>
-          <td>
-            <input type="number" name="qty" class="form-control" min="0" step="1" value="0" required>
-          </td>
-          <td>
-            <input type="number" name="unit_price_ttc" class="form-control" min="0" step="0.01"
-                   placeholder="{{ ('%.2f'|format(v.price_ttc if v.price_ttc is not none else 0)).replace('.', ',') }}">
-          </td>
-          <td>
-            <input type="number" name="deposit_per_keg" class="form-control" min="0" step="0.01"
-                   placeholder="{{ '1,00' if is_ecocup else '30,00' }}">
-          </td>
+          <td>{% if v.size_l %}{{ ('%.1f'|format(v.size_l)).rstrip('0').rstrip('.') }} L{% else %}—{% endif %}</td>
+          <td><input type="number" name="qty" class="form-control" min="0" step="1" value="0" required></td>
+          <td><input type="number" name="unit_price_ttc" class="form-control" min="0" step="0.01"
+                     placeholder="{{ ('%.2f'|format(v.price_ttc if v.price_ttc is not none else 0)).replace('.', ',') }}"></td>
+          <td><input type="number" name="deposit_per_keg" class="form-control" min="0" step="0.01"
+                     placeholder="{{ '1,00' if is_ecocup else '30,00' }}"></td>
         </tr>
       {% endfor %}
       </tbody>
