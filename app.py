@@ -84,20 +84,34 @@ def create_app():
             name = request.form.get("name", "").strip()
             if not name:
                 flash("Nom obligatoire.", "warning")
-                return render_template("client_form.html")
+                return render_template("client_form.html", client=None, is_edit=False)
             c = Client(name=name)
             db.session.add(c)
             db.session.commit()
             flash("Client créé.", "success")
             return redirect(url_for("clients"))
-        return render_template("client_form.html")
+        return render_template("client_form.html", client=None, is_edit=False)
+
+    # ✅ Route manquante ajoutée : édition client
+    @app.route("/client/<int:client_id>/edit", methods=["GET", "POST"])
+    def client_edit(client_id):
+        c = Client.query.get_or_404(client_id)
+        if request.method == "POST":
+            name = request.form.get("name", "").strip()
+            if not name:
+                flash("Nom obligatoire.", "warning")
+                return render_template("client_form.html", client=c, is_edit=True)
+            c.name = name
+            db.session.commit()
+            flash("Client modifié.", "success")
+            return redirect(url_for("clients"))
+        return render_template("client_form.html", client=c, is_edit=True)
 
     @app.route("/client/<int:client_id>")
     def client_detail(client_id):
         c = Client.query.get_or_404(client_id)
         view = U.summarize_client_detail(c)
 
-        # Historique trié
         movements = (
             db.session.query(Movement, Variant, Product)
             .join(Variant, Movement.variant_id == Variant.id)
@@ -124,13 +138,13 @@ def create_app():
         variants = (
             db.session.query(Variant)
             .join(Product, Variant.product_id == Product.id)
-            # ⬇️ on N'EXCLUT PLUS ecocup/gobelet → visibilité dans le catalogue
+            # Ecocup visibles
             .order_by(Product.name, Variant.size_l)
             .all()
         )
         return render_template("catalog.html", variants=variants)
 
-    # ------------- Saisie (ex “mouvement pas à pas”) -------------
+    # ------------- Saisie (wizard) -------------
     @app.route("/movement/new", methods=["GET"])
     def movement_new():
         return redirect(url_for("movement_wizard"))
@@ -143,7 +157,6 @@ def create_app():
 
         step = int(request.args.get("step", 1))
         if request.method == "POST":
-            # step switch via POST
             goto = request.args.get("step")
             if goto:
                 step = int(goto)
@@ -160,11 +173,8 @@ def create_app():
             base_q = (
                 db.session.query(Variant, Product)
                 .join(Product, Variant.product_id == Product.id)
-                # ⬇️ on N'EXCLUT PLUS ecocup/gobelet → visible dans le wizard
                 .order_by(Product.name, Variant.size_l)
             )
-
-            # En Reprise (IN) : limiter aux fûts “en jeu” + TOUJOURS ajouter “Matériel seul …”
             if wiz.get("type") == "IN" and wiz.get("client_id"):
                 open_map = _open_kegs_by_variant(wiz["client_id"])
                 allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
@@ -184,7 +194,6 @@ def create_app():
                         .all()
                     )
                 )
-
                 final_ids = list(allowed_ids | equip_ids)
                 if final_ids:
                     base_q = base_q.filter(Variant.id.in_(final_ids))
@@ -193,7 +202,6 @@ def create_app():
             return render_template("movement_wizard.html", step=2, clients=clients, rows=rows, wiz=wiz)
 
         elif step == 2 and request.method == "POST":
-            # sélection de variantes → step 3
             vids = request.form.getlist("variant_id")
             wiz["variant_ids"] = [int(v) for v in vids]
             session.modified = True
@@ -208,7 +216,6 @@ def create_app():
                 flash("Informations incomplètes.", "warning")
                 return redirect(url_for("movement_wizard", step=1))
 
-            # Date finale : vide -> date de saisie (now)
             if wiz.get("date"):
                 try:
                     y, m_, d2 = [int(x) for x in wiz["date"].split("-")]
@@ -224,7 +231,6 @@ def create_app():
             deposits = request.form.getlist("deposit_per_keg")
             notes = request.form.get("notes") or None
 
-            # Matériel prêté/repris (inséré en note)
             t = request.form.get("eq_tireuse", type=int)
             c2 = request.form.get("eq_co2", type=int)
             cpt = request.form.get("eq_comptoir", type=int)
@@ -271,7 +277,6 @@ def create_app():
                 if not v:
                     continue
 
-                # “Matériel seul” => pas d'enjeu de fûts ni de consigne/prix
                 pname = (v.product.name if v and v.product else "") or ""
                 is_equipment_only = "matériel" in pname.lower() and "seul" in pname.lower()
                 if is_equipment_only:
@@ -282,8 +287,7 @@ def create_app():
                     if up is None and (v.price_ttc is not None):
                         up = v.price_ttc
                     if dep is None:
-                        # ⬇️ consigne par défaut par produit (Ecocup = 1 €, sinon 30 €)
-                        dep = U.default_deposit_for_product(v.product)
+                        dep = U.default_deposit_for_product(v.product)  # Ecocup=1€, sinon 30€
 
                     if mtype == "IN":
                         open_q = int(open_map.get(vid_int, 0))
@@ -304,7 +308,6 @@ def create_app():
                 )
                 db.session.add(mv)
 
-                # MÀJ inventaire (bar) sur OUT/FULL
                 inv = U.get_or_create_inventory(vid_int)
                 if mtype == "OUT":
                     inv.qty = (inv.qty or 0) - qty_int
@@ -333,7 +336,6 @@ def create_app():
             base_q = (
                 db.session.query(Variant, Product)
                 .join(Product, Variant.product_id == Product.id)
-                # ⬇️ idem: Ecocup visibles
                 .order_by(Product.name, Variant.size_l)
             )
             rows = base_q.all()
@@ -355,7 +357,6 @@ def create_app():
         m = Movement.query.get_or_404(movement_id)
         client_id = m.client_id
 
-        # Rétablir l’inventaire
         if m.qty and m.variant_id:
             inv = U.get_or_create_inventory(m.variant_id)
             if m.type == "OUT":
