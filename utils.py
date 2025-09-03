@@ -31,12 +31,11 @@ def _to_float(x, default=0.0) -> float:
 
 def _is_ecocup_name(name: str) -> bool:
     n = (name or "").lower()
-    return ("ecocup" in n) or ("gobelet" in n)
+    return ("ecocup" in n) or ("eco cup" in n) or ("gobelet" in n)
 
 
 def _is_equipment_only_name(name: str) -> bool:
     n = (name or "").lower()
-    # On considère "Matériel seul" comme l'article générique d'équipement
     return ("matériel" in n or "materiel" in n) and ("seul" in n)
 
 
@@ -47,7 +46,7 @@ def default_deposit_for_product(product) -> float:
     - Autres (fûts, etc.) -> 30.00 €
     """
     name = (getattr(product, "name", "") or "").lower()
-    if "ecocup" in name or "gobelet" in name:
+    if "ecocup" in name or "eco cup" in name or "gobelet" in name:
         return 1.0
     return 30.0
 
@@ -58,17 +57,12 @@ def get_or_create_inventory(variant_id: int) -> Inventory:
     if not inv:
         inv = Inventory(variant_id=variant_id, qty=0)
         db.session.add(inv)
-        # ATTENTION : commit géré par l'appelant, pour regrouper les opérations
     return inv
 
 
 # -------------------- Agrégations client --------------------
 
 def _movements_joined_for_client(client_id: int):
-    """
-    Retourne tous les mouvements du client avec leurs variantes/produits,
-    triés du plus récent au plus ancien.
-    """
     rows = (
         db.session.query(Movement, Variant, Product)
         .join(Variant, Movement.variant_id == Variant.id)
@@ -81,10 +75,6 @@ def _movements_joined_for_client(client_id: int):
 
 
 def _parse_equipment_notes(notes: str) -> Dict[str, int]:
-    """
-    Convertit une chaîne de notes 'tireuse=1;co2=2;comptoir=1;tonnelle=0'
-    en dict de compteurs.
-    """
     out: Dict[str, int] = {"tireuse": 0, "co2": 0, "comptoir": 0, "tonnelle": 0}
     if not notes:
         return out
@@ -94,19 +84,14 @@ def _parse_equipment_notes(notes: str) -> Dict[str, int]:
             k, v = part.split("=", 1)
             k = k.strip().lower()
             if k in out:
-                out[k] += _to_int(v, 0)
+                try:
+                    out[k] += int(v)
+                except Exception:
+                    pass
     return out
 
 
 def summarize_client_detail(client: Client) -> Dict:
-    """
-    Calcule les indicateurs utilisés sur la fiche client :
-    - kegs : unités en jeu (hors ecocup & matériel seul)
-    - deposit_eur : consignes en jeu
-    - beer_eur : montant TTC facturé (cumul) pour la bière (hors ecocup / matériel)
-    - liters_out_cum : litres livrés (cumul)
-    - equipment : totaux d'équipement en jeu (via notes OUT/IN)
-    """
     rows = _movements_joined_for_client(client.id)
 
     kegs_open = 0
@@ -123,13 +108,13 @@ def summarize_client_detail(client: Client) -> Dict:
         unit_price = m.unit_price_ttc if (m.unit_price_ttc is not None) else (v.price_ttc if v and v.price_ttc is not None else None)
         deposit = m.deposit_per_keg if (m.deposit_per_keg is not None) else default_deposit_for_product(p)
 
-        # Débits/Crédits consigne
+        # Consigne en jeu
         if m.type == "OUT":
             deposit_eur += _to_float(deposit) * qty
         elif m.type in ("IN", "DEFECT", "FULL"):
             deposit_eur -= _to_float(deposit) * qty
 
-        # Bière facturée et litres sortis (on ignore ecocup et "matériel seul")
+        # Bière + litres (ignore ecocup et "matériel seul")
         if not is_cup and not is_equipment_only:
             if m.type == "OUT":
                 if v and v.size_l:
@@ -137,13 +122,12 @@ def summarize_client_detail(client: Client) -> Dict:
                 if unit_price is not None:
                     beer_eur += _to_float(unit_price) * qty
 
-            # Unités en jeu (kegs)
             if m.type == "OUT":
                 kegs_open += qty
             elif m.type in ("IN", "DEFECT", "FULL"):
                 kegs_open -= qty
 
-        # Équipement en jeu sur base des notes (OUT ajoute, IN retire)
+        # Équipement via notes
         if m.notes:
             parsed = _parse_equipment_notes(m.notes)
             sign = 1 if m.type == "OUT" else (-1 if m.type in ("IN", "DEFECT", "FULL") else 0)
@@ -161,7 +145,6 @@ def summarize_client_detail(client: Client) -> Dict:
 
 
 def summarize_client_for_index(client: Client) -> Dict:
-    """Résumé compact pour la page d'accueil."""
     detail = summarize_client_detail(client)
     return {
         "id": client.id,
@@ -175,7 +158,6 @@ def summarize_client_for_index(client: Client) -> Dict:
 
 
 def summarize_totals(cards: List[Dict]) -> Dict:
-    """Totaux agrégés pour l'accueil."""
     total_clients = len(cards)
     total_kegs = sum(_to_int(c.get("kegs", 0), 0) for c in cards)
     total_deposit = sum(_to_float(c.get("deposit_eur", 0.0), 0.0) for c in cards)
@@ -193,12 +175,6 @@ def summarize_totals(cards: List[Dict]) -> Dict:
 # -------------------- Stock & réassort --------------------
 
 def get_stock_items() -> List[Tuple[Variant, Product, int, int]]:
-    """
-    Retourne les lignes pour l'écran Stock.
-    Format : liste de tuples (Variant, Product, inv_qty, min_qty)
-    - inv_qty : quantité d'inventaire actuelle (bar)
-    - min_qty : seuil mini (règle de réassort)
-    """
     rows = (
         db.session.query(Variant, Product)
         .join(Product, Variant.product_id == Product.id)
@@ -218,17 +194,10 @@ def get_stock_items() -> List[Tuple[Variant, Product, int, int]]:
 
 def compute_reorder_alerts() -> List[Dict]:
     """
-    Construit la liste des alertes de réassort POUR LES MACROS EXISTANTES :
-    Chaque élément est un dict avec au minimum:
-      - 'variant': objet Variant
-      - 'product': objet Product
-      - 'inv_qty': int
-      - 'min_qty': int
-      - 'missing': int (min - inv)
-    -> Compatible avec {{ a.product.name }} et {{ a.variant.size_l }} dans _macros.html
+    Retourne des alertes compatibles avec _macros.html :
+    { 'variant': Variant, 'product': Product, 'inv_qty': int, 'min_qty': int, 'missing': int }
     """
     alerts: List[Dict] = []
-    # On part des règles connues
     rules = ReorderRule.query.all()
     for rr in rules:
         v = Variant.query.get(rr.variant_id)
@@ -245,10 +214,6 @@ def compute_reorder_alerts() -> List[Dict]:
                 "inv_qty": inv_qty,
                 "min_qty": min_qty,
                 "missing": (min_qty - inv_qty),
-                # Champs de compatibilité optionnels si d'autres templates en ont besoin:
-                "product_name": (p.name if p else f"Var#{v.id}"),
-                "size_l": getattr(v, "size_l", None),
             })
-    # Tri : manque le plus élevé d'abord, puis par nom produit
     alerts.sort(key=lambda a: (-a["missing"], a["product"].name if a.get("product") else ""))
     return alerts
