@@ -8,7 +8,7 @@ from sqlalchemy import func
 from models import db, Client, Product, Variant, Movement, Inventory, ReorderRule
 
 # --- Constantes ---
-DEFAULT_KEG_DEPOSIT = 30.0         # consigne par fût
+DEFAULT_DEPOSIT = 30.0             # attendu par app.py (wizard)
 DEFAULT_ECOCUP_DEPOSIT = 1.0       # consigne par gobelet
 MOV_TYPES = {"OUT", "IN", "DEFECT", "FULL"}  # FULL = retour plein
 
@@ -20,7 +20,18 @@ class Equipment:
     co2: int = 0
     comptoir: int = 0
     tonnelle: int = 0
-    ecocup: int = 0   # prêt de gobelets via notes (optionnel)
+
+
+@dataclass
+class Card:
+    id: int
+    name: str
+    kegs: int
+    beer_eur: float
+    deposit_eur: float
+    equipment: Equipment
+    last_out: Optional[object] = None
+    last_in: Optional[object] = None
 
 
 def now_utc():
@@ -28,6 +39,7 @@ def now_utc():
     return datetime.now(timezone.utc)
 
 
+# --- Notes -> matériel prêté/repris ---
 def parse_equipment(notes: Optional[str]) -> Equipment:
     if not notes:
         return Equipment()
@@ -50,10 +62,8 @@ def parse_equipment(notes: Optional[str]) -> Equipment:
                     eq.comptoir = val
                 elif k == "tonnelle":
                     eq.tonnelle = val
-                elif k == "ecocup":
-                    eq.ecocup = val
     except Exception:
-        # Parsing permissif
+        # parsing permissif
         pass
     return eq
 
@@ -63,89 +73,209 @@ def combine_equipment(dst: Equipment, src: Equipment, sign: int):
     dst.co2 += sign * (src.co2 or 0)
     dst.comptoir += sign * (src.comptoir or 0)
     dst.tonnelle += sign * (src.tonnelle or 0)
-    dst.ecocup += sign * (src.ecocup or 0)
 
 
 # --- Prix / Consigne effectifs ---
 def effective_price(m: Movement, v: Variant) -> Optional[float]:
-    # Prix prioritaire saisi sur le mouvement, sinon celui de la variante si présent
-    return m.unit_price_ttc if m.unit_price_ttc is not None else getattr(v, "price_ttc", None)
+    return m.unit_price_ttc if m.unit_price_ttc is not None else v.price_ttc
 
 
-def is_ecocup_product(product_name: Optional[str]) -> bool:
-    if not product_name:
+def _is_ecocup_name(name: Optional[str]) -> bool:
+    if not name:
         return False
-    name = product_name.strip().lower()
-    return ("ecocup" in name) or ("éco" in name and "cup" in name) or ("gobelet" in name)
+    n = name.lower()
+    return ("ecocup" in n) or ("gobelet" in n) or ("eco cup" in n) or ("eco-cup" in n)
 
 
-def effective_deposit(m: Movement, product_name: Optional[str] = None) -> float:
-    """
-    Consigne effective:
-      - si présente sur le mouvement => utiliser cette valeur
-      - sinon: 1,00 € pour 'Ecocup', 30,00 € pour le reste (fûts)
-    Param 'product_name' optionnel pour compat avec anciens appels.
-    """
+def is_ecocup_product(product: Product) -> bool:
+    return _is_ecocup_name(product.name if product else None)
+
+
+def default_deposit_for_product(product: Optional[Product]) -> float:
+    return DEFAULT_ECOCUP_DEPOSIT if (product and is_ecocup_product(product)) else DEFAULT_DEPOSIT
+
+
+def effective_deposit(m: Movement, product: Optional[Product] = None) -> float:
     if m.deposit_per_keg is not None:
         try:
             return float(m.deposit_per_keg)
         except Exception:
             pass
-    if product_name and is_ecocup_product(product_name):
-        return float(DEFAULT_ECOCUP_DEPOSIT)
-    return float(DEFAULT_KEG_DEPOSIT)
+    return default_deposit_for_product(product)
 
 
-# --- Requêtes composées ---
+# --- Inventaire (bar) ---
+def get_or_create_inventory(variant_id: int) -> Inventory:
+    inv = Inventory.query.filter_by(variant_id=variant_id).first()
+    if not inv:
+        inv = Inventory(variant_id=variant_id, qty=0)
+        db.session.add(inv)
+        db.session.flush()
+    return inv
+
+
+# --- Stock (liste simple attendue par templates/stock.html) ---
+def get_stock_items():
+    variants = (
+        db.session.query(Variant)
+        .join(Product, Variant.product_id == Product.id)
+        # On conserve l’exclusion des gobelets dans la page "Stock bar (fûts pleins)"
+        .filter(~Product.name.ilike("%ecocup%"), ~Product.name.ilike("%gobelet%"))
+        .order_by(Product.name, Variant.size_l)
+        .all()
+    )
+    rules_by_vid = {r.variant_id: r for r in ReorderRule.query.all()}
+    rows = []
+    for v in variants:
+        inv = get_or_create_inventory(v.id)
+        rr = rules_by_vid.get(v.id)
+        rows.append(dict(
+            variant=v,
+            qty=int(inv.qty or 0),
+            min_qty=int((rr.min_qty if rr else 0) or 0),
+        ))
+    return rows
+
+
+def compute_reorder_alerts():
+    """
+    Renvoie une liste d'objets avec:
+      .product (Product), .variant (Variant), .qty, .min_qty, .need
+    Compatible avec ui.alerts_list(alerts).
+    """
+    rules_by_vid = {r.variant_id: int(r.min_qty or 0) for r in ReorderRule.query.all()}
+    if not rules_by_vid:
+        return []
+    alerts: List[SimpleNamespace] = []
+    q = db.session.query(Variant).join(Product, Variant.product_id == Product.id)
+    for v in q.all():
+        min_qty = rules_by_vid.get(v.id)
+        if not min_qty:
+            continue
+        inv = get_or_create_inventory(v.id)
+        qty = int(inv.qty or 0)
+        if qty < int(min_qty):
+            need = int(min_qty) - qty
+            alerts.append(SimpleNamespace(
+                product=v.product,
+                variant=v,
+                qty=qty,
+                min_qty=int(min_qty),
+                need=need,
+            ))
+    # les plus urgents d’abord
+    alerts.sort(key=lambda a: (-a.need, a.product.name or "", a.variant.size_l or 0))
+    return alerts
+
+
+# --- Accueil (cartes) ---
+def summarize_client_for_index(c: Client) -> Card:
+    # kegs = OUT - (IN + DEFECT + FULL)
+    sums = dict(
+        db.session.query(Movement.type, func.coalesce(func.sum(Movement.qty), 0))
+        .filter(Movement.client_id == c.id)
+        .group_by(Movement.type)
+        .all()
+    )
+    total_out = int(sums.get("OUT", 0))
+    total_in = int(sums.get("IN", 0))
+    total_def = int(sums.get("DEFECT", 0))
+    total_full = int(sums.get("FULL", 0))
+    kegs = total_out - (total_in + total_def + total_full)
+
+    # montants bière + consigne (OUT uniquement)
+    beer_eur = 0.0
+    deposit_eur = 0.0
+    last_out = None
+    last_in = None
+    equipment = Equipment()
+
+    rows = (
+        db.session.query(Movement, Variant, Product)
+        .join(Variant, Movement.variant_id == Variant.id)
+        .join(Product, Variant.product_id == Product.id)
+        .filter(Movement.client_id == c.id)
+        .order_by(Movement.created_at.desc())
+        .all()
+    )
+    for m, v, p in rows:
+        if m.type == "OUT":
+            beer_eur += (m.qty or 0) * (effective_price(m, v) or 0.0)
+            deposit_eur += (m.qty or 0) * effective_deposit(m, p)
+            last_out = last_out or m.created_at
+            combine_equipment(equipment, parse_equipment(m.notes), +1)
+        elif m.type == "IN":
+            last_in = last_in or m.created_at
+            combine_equipment(equipment, parse_equipment(m.notes), -1)
+
+    return Card(
+        id=c.id,
+        name=c.name,
+        kegs=kegs,
+        beer_eur=round(beer_eur, 2),
+        deposit_eur=round(deposit_eur, 2),
+        equipment=equipment,
+        last_out=last_out,
+        last_in=last_in,
+    )
+
+
+def summarize_totals(cards: List[Card]) -> Dict[str, float]:
+    return dict(
+        kegs=sum(c.kegs for c in cards),
+        beer_eur=round(sum(c.beer_eur for c in cards), 2),
+        deposit_eur=round(sum(c.deposit_eur for c in cards), 2),
+        tireuse=sum(c.equipment.tireuse for c in cards),
+        co2=sum(c.equipment.co2 for c in cards),
+        comptoir=sum(c.equipment.comptoir for c in cards),
+        tonnelle=sum(c.equipment.tonnelle for c in cards),
+    )
+
+
+# --- Détail client ---
 def client_movements_full(client_id: int):
-    q = (
+    return (
         db.session.query(Movement, Variant, Product)
         .join(Variant, Movement.variant_id == Variant.id)
         .join(Product, Variant.product_id == Product.id)
         .filter(Movement.client_id == client_id)
         .order_by(Movement.created_at.desc(), Movement.id.desc())
+        .all()
     )
-    return q.all()
 
 
 def summarize_client_detail(c: Client) -> Dict:
-    rows: List[Dict] = []
+    rows = []
     beer_eur = 0.0
     deposit_eur = 0.0
     equipment = Equipment()
     liters_out_cum = 0.0
-    last_date = None
 
     for m, v, p in client_movements_full(c.id):
         price = effective_price(m, v) or 0.0
-        dep = effective_deposit(m, getattr(p, "name", None))
-        eq = parse_equipment(m.notes)
+        dep = effective_deposit(m, p)
 
         if m.type == "OUT":
             beer_eur += (m.qty or 0) * price
             deposit_eur += (m.qty or 0) * dep
-            liters_out_cum += (m.qty or 0) * (getattr(v, "size_l", 0) or 0)
-            combine_equipment(equipment, eq, +1)
+            liters_out_cum += (m.qty or 0) * (v.size_l or 0)
+            combine_equipment(equipment, parse_equipment(m.notes), +1)
         elif m.type in {"IN", "DEFECT", "FULL"}:
             if m.type == "IN":
-                combine_equipment(equipment, eq, -1)
-
-        if last_date is None:
-            last_date = m.created_at  # tri desc → première itération = plus récente
+                combine_equipment(equipment, parse_equipment(m.notes), -1)
 
         rows.append(dict(
             id=m.id,
             date=m.created_at,
             type=m.type,
             product=p.name,
-            size_l=getattr(v, "size_l", None),
+            size_l=v.size_l,
             qty=m.qty,
             unit_price_ttc=price,
             deposit_per_keg=dep,
             notes=m.notes,
         ))
 
-    # Totaux simples par type de mouvement
     sums = dict(
         db.session.query(Movement.type, func.coalesce(func.sum(Movement.qty), 0))
         .filter(Movement.client_id == c.id)
@@ -165,173 +295,4 @@ def summarize_client_detail(c: Client) -> Dict:
         deposit_eur=round(deposit_eur, 2),
         equipment=equipment,
         liters_out_cum=round(liters_out_cum, 2),
-        last_movement_date=last_date,
     )
-
-
-# --- Fonctions attendues par app.py / templates ---
-
-def summarize_client_for_index(c: Client):
-    """
-    Version compacte pour la page d’accueil.
-    Retourne un SimpleNamespace accessible par attributs en Jinja.
-    Champs disponibles:
-      client, client_id, client_name, kegs, beer_eur, deposit_eur,
-      equipment, liters_out_cum, last_movement_date
-    """
-    d = summarize_client_detail(c)
-    payload = {
-        "client": c,
-        "client_id": c.id,
-        "client_name": c.name,
-        "kegs": d.get("kegs", 0),
-        "beer_eur": d.get("beer_eur", 0.0),
-        "deposit_eur": d.get("deposit_eur", 0.0),
-        "equipment": d.get("equipment"),
-        "liters_out_cum": d.get("liters_out_cum", 0.0),
-        "last_movement_date": d.get("last_movement_date"),
-    }
-    return SimpleNamespace(**payload)
-
-
-def summarize_totals(cards: List[SimpleNamespace]):
-    """
-    Agrège les totaux pour l’en-tête de l’accueil.
-    Compatible avec les templates existants qui accèdent à .beer_eur, .deposit_eur, .kegs, .equipment, .liters_out_cum
-    """
-    total_beer = 0.0
-    total_dep = 0.0
-    total_kegs = 0
-    total_liters = 0.0
-    eq = Equipment()
-
-    for c in cards or []:
-        total_beer += float(getattr(c, "beer_eur", 0.0) or 0.0)
-        total_dep += float(getattr(c, "deposit_eur", 0.0) or 0.0)
-        total_kegs += int(getattr(c, "kegs", 0) or 0)
-        total_liters += float(getattr(c, "liters_out_cum", 0.0) or 0.0)
-        ceq: Equipment = getattr(c, "equipment", None)
-        if isinstance(ceq, Equipment):
-            combine_equipment(eq, ceq, +1)
-
-    return SimpleNamespace(
-        beer_eur=round(total_beer, 2),
-        deposit_eur=round(total_dep, 2),
-        kegs=int(total_kegs),
-        liters_out_cum=round(total_liters, 2),
-        equipment=eq,
-    )
-
-
-def get_stock_items():
-    """
-    Liste des items de stock (par variante) pour /stock.
-    Champs: product_id, product_name, variant_id, size_l, qty, reorder_min, below_min, status
-    """
-    # Stock agrégé
-    inv = dict(
-        db.session.query(Inventory.variant_id, func.coalesce(func.sum(Inventory.qty), 0))
-        .group_by(Inventory.variant_id)
-        .all()
-    )
-
-    # Règles de réassort (optionnelles)
-    rules = {r.variant_id: r.min_qty for r in ReorderRule.query.all()}
-
-    rows: List[SimpleNamespace] = []
-    q = (
-        db.session.query(Variant, Product)
-        .join(Product, Variant.product_id == Product.id)
-        .order_by(Product.name.asc(), Variant.size_l.asc())
-    )
-    for v, p in q.all():
-        qty = int(inv.get(v.id, 0) or 0)
-        min_qty = rules.get(v.id)
-        below = (min_qty is not None) and (qty < int(min_qty))
-        status = "LOW" if below else "OK"
-        rows.append(SimpleNamespace(
-            product_id=p.id,
-            product_name=p.name,
-            variant_id=v.id,
-            size_l=getattr(v, "size_l", None),
-            qty=qty,
-            reorder_min=min_qty,
-            below_min=bool(below),
-            status=status,
-        ))
-
-    return rows
-
-
-def compute_reorder_alerts():
-    """
-    Calcule les alertes de réassort attendues par l’accueil.
-    Retourne UNIQUEMENT les variantes en dessous du seuil défini dans ReorderRule.
-    Chaque alerte est un SimpleNamespace avec:
-      - product_id, product_name
-      - variant_id, size_l
-      - qty (stock courant)
-      - min_qty (seuil)
-      - delta (min_qty - qty, >0)
-      - status = 'LOW'
-    Si aucune règle n’est définie → renvoie [] (pas d’alertes).
-    """
-    # Récup stock agrégé
-    inv = dict(
-        db.session.query(Inventory.variant_id, func.coalesce(func.sum(Inventory.qty), 0))
-        .group_by(Inventory.variant_id)
-        .all()
-    )
-    # Règles
-    rules = {r.variant_id: int(r.min_qty) for r in ReorderRule.query.all()}
-    if not rules:
-        return []
-
-    alerts: List[SimpleNamespace] = []
-
-    q = (
-        db.session.query(Variant, Product)
-        .join(Product, Variant.product_id == Product.id)
-    )
-    for v, p in q.all():
-        if v.id not in rules:
-            continue
-        qty = int(inv.get(v.id, 0) or 0)
-        min_qty = rules[v.id]
-        if qty < min_qty:
-            delta = int(min_qty - qty)
-            alerts.append(SimpleNamespace(
-                product_id=p.id,
-                product_name=p.name,
-                variant_id=v.id,
-                size_l=getattr(v, "size_l", None),
-                qty=qty,
-                min_qty=min_qty,
-                delta=delta,
-                status="LOW",
-            ))
-
-    # Tri: les plus urgents d’abord (delta le plus grand), puis nom produit
-    alerts.sort(key=lambda a: (-a.delta, a.product_name or "", a.size_l or 0))
-    return alerts
-
-
-# --- Helpers d'affichage tolérants (facultatif, pour éviter d'autres AttributeError côté templates) ---
-
-def format_eur(x):
-    try:
-        return f"{float(x):.2f} €"
-    except Exception:
-        return "0.00 €"
-
-def fmt_qty(x):
-    try:
-        return int(x)
-    except Exception:
-        return 0
-
-def fmt_date(dt):
-    try:
-        return dt.strftime("%d/%m/%Y %H:%M")
-    except Exception:
-        return ""
