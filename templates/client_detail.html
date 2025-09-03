@@ -31,7 +31,6 @@
   <div class="card-body">
     <div class="d-flex align-items-center justify-content-between mb-2">
       <div class="h5 mb-0">Historique</div>
-      <!-- ✅ Passe l'id client au wizard pour sauter la sélection -->
       <a class="btn btn-sm btn-primary" href="{{ url_for('movement_wizard', step=1, client_id=client.id) }}">Nouveau mouvement</a>
     </div>
 
