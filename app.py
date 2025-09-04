@@ -1,6 +1,7 @@
 # app.py  — Option B (WSGI = gunicorn app:app)
 import os
 from datetime import datetime, date, time
+from types import SimpleNamespace
 
 from flask import (
     Flask, render_template, request, redirect, url_for, flash, session, Response
@@ -207,19 +208,32 @@ def create_app():
     @app.route("/catalog")
     def catalog():
         """
-        Donne au template les deux formats possibles :
+        Donne au template tous les formats possibles :
         - rows : liste de (Variant, Product)
         - variants : liste de Variant
+        - items : objets avec attributs .variant / .product
+        + alerts : certains templates l'affichent via _macros.html
         """
-        pairs = (
+        q = (
             db.session.query(Variant, Product)
             .join(Product, Variant.product_id == Product.id)
             .order_by(Product.name, Variant.size_l)
         )
-        pairs = _hide_ecocup_maintenance(pairs)
-        rows = pairs.all()
-        variants = [v for (v, _p) in rows]
-        return render_template("catalog.html", rows=rows, variants=variants)
+        q = _hide_ecocup_maintenance(q)
+        rows = q.all()                       # [(Variant, Product), ...]
+        variants = [v for (v, _p) in rows]   # [Variant, ...]
+        items = [SimpleNamespace(variant=v, product=p) for (v, p) in rows]
+
+        # Fournir aussi alerts si le template l'affiche en haut
+        alerts = U.compute_reorder_alerts()
+
+        return render_template(
+            "catalog.html",
+            rows=rows,
+            variants=variants,
+            items=items,
+            alerts=alerts,
+        )
 
     # ------------- Saisie (wizard) -------------
     @app.route("/movement/new", methods=["GET"])
@@ -321,9 +335,9 @@ def create_app():
                 if final_ids:
                     base_q = base_q.filter(Variant.id.in_(final_ids))
 
-            rows = base_q.all()
+            rows2 = base_q.all()
             prefill_client = Client.query.get(wiz.get("client_id")) if wiz.get("client_id") else None
-            return render_template("movement_wizard.html", step=2, clients=clients, rows=rows, wiz=wiz, prefill_client=prefill_client)
+            return render_template("movement_wizard.html", step=2, clients=clients, rows=rows2, wiz=wiz, prefill_client=prefill_client)
 
         # ---------- ÉTAPE 3 : saut direct vers 4 ----------
         if step == 3:
@@ -507,15 +521,15 @@ def create_app():
             flash(f"Inventaire enregistré ({changed} mise(s) à jour).", "success")
             return redirect(url_for("stock"))
 
-        # Sortie principale (tuples)
-        rows = U.get_stock_items()
-        # Format alternatif (dicts) si le template s'attend à des attributs
-        items = [
-            {"variant": v, "product": p, "inv_qty": inv_qty, "min_qty": min_qty}
-            for (v, p, inv_qty, min_qty) in rows
+        # Résultat bas niveau (tuples)
+        rows_raw = U.get_stock_items()  # [(Variant, Product, inv_qty, min_qty), ...]
+        # Mapping attributaire pour les templates qui accèdent par .product / .variant
+        rows = [
+            SimpleNamespace(variant=v, product=p, inv_qty=inv_qty, min_qty=min_qty)
+            for (v, p, inv_qty, min_qty) in rows_raw
         ]
         alerts = U.compute_reorder_alerts()
-        return render_template("stock.html", rows=rows, items=items, alerts=alerts)
+        return render_template("stock.html", rows=rows, rows_raw=rows_raw, alerts=alerts)
 
     @app.route("/product/<int:variant_id>")
     def product_variant(variant_id):
