@@ -206,15 +206,20 @@ def create_app():
 
     @app.route("/catalog")
     def catalog():
-        # IMPORTANT : retourner des paires (Variant, Product) et passer 'rows' au template
-        base_q = (
+        """
+        Donne au template les deux formats possibles :
+        - rows : liste de (Variant, Product)
+        - variants : liste de Variant
+        """
+        pairs = (
             db.session.query(Variant, Product)
             .join(Product, Variant.product_id == Product.id)
             .order_by(Product.name, Variant.size_l)
         )
-        base_q = _hide_ecocup_maintenance(base_q)  # masque lavage/perdu
-        rows = base_q.all()
-        return render_template("catalog.html", rows=rows)
+        pairs = _hide_ecocup_maintenance(pairs)
+        rows = pairs.all()
+        variants = [v for (v, _p) in rows]
+        return render_template("catalog.html", rows=rows, variants=variants)
 
     # ------------- Saisie (wizard) -------------
     @app.route("/movement/new", methods=["GET"])
@@ -502,9 +507,15 @@ def create_app():
             flash(f"Inventaire enregistré ({changed} mise(s) à jour).", "success")
             return redirect(url_for("stock"))
 
+        # Sortie principale (tuples)
         rows = U.get_stock_items()
+        # Format alternatif (dicts) si le template s'attend à des attributs
+        items = [
+            {"variant": v, "product": p, "inv_qty": inv_qty, "min_qty": min_qty}
+            for (v, p, inv_qty, min_qty) in rows
+        ]
         alerts = U.compute_reorder_alerts()
-        return render_template("stock.html", rows=rows, alerts=alerts)
+        return render_template("stock.html", rows=rows, items=items, alerts=alerts)
 
     @app.route("/product/<int:variant_id>")
     def product_variant(variant_id):
