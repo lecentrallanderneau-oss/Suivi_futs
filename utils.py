@@ -1,6 +1,70 @@
-# --- utils.py : ajout ---
-from sqlalchemy import func
-from models import db, Movement, Variant, Product
+# utils.py
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Dict, List, Tuple
+
+from sqlalchemy import func, and_
+
+from models import db, Client, Product, Variant, Movement, Inventory, ReorderRule
+
+
+# -------------------- Helpers texte / catégorisation --------------------
+
+def _lc(s: str | None) -> str:
+    return (s or "").strip().lower()
+
+
+def _is_cup_product(p: Product | None) -> bool:
+    """Produit Ecocup générique (gobelet), hors 'lavage/perdu/perte/wash/clean'."""
+    if not p:
+        return False
+    name = _lc(p.name)
+    if ("ecocup" in name or "eco cup" in name or "gobelet" in name):
+        if any(x in name for x in ["lavage", "perdu", "perte", "wash", "clean"]):
+            return False
+        return True
+    return False
+
+
+def _is_cup_maintenance(p: Product | None) -> bool:
+    """Ecocup maintenance (lavage / perdu), à exclure des listings et des dépôts."""
+    if not p:
+        return False
+    name = _lc(p.name)
+    return ("ecocup" in name or "eco cup" in name or "gobelet" in name) and any(
+        x in name for x in ["lavage", "perdu", "perte", "wash", "clean"]
+    )
+
+
+def _is_equipment_only(p: Product | None) -> bool:
+    """Matériel seul (pas de volume / pas de dépôt)."""
+    if not p:
+        return False
+    n = _lc(p.name)
+    return (("matériel" in n or "materiel" in n) and "seul" in n)
+
+
+def default_deposit_for_product(p: Product | None) -> float:
+    """
+    Dépôt par unité :
+      - Ecocup générique : 1.0 €
+      - Matériel seul : 0 €
+      - Autres (fûts & assimilés) : 30.0 €
+    """
+    if _is_equipment_only(p):
+        return 0.0
+    if _is_cup_product(p):
+        return 1.0
+    return 30.0
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# -------------------- TA logique: compute_deposits_split (inchangée) --------------------
 
 def compute_deposits_split(client_id: int):
     """
@@ -35,7 +99,7 @@ def compute_deposits_split(client_id: int):
         is_maintenance = any(w in n for w in ["lavage", "wash", "perdu", "perte", "clean"])
         return is_cup and not is_maintenance
 
-    def _is_equipment_only(name: str) -> bool:
+    def _is_equipment_only_name(name: str) -> bool:
         if not name:
             return False
         n = name.lower()
@@ -62,7 +126,7 @@ def compute_deposits_split(client_id: int):
 
         name_lc = (pname or "").lower()
 
-        if _is_equipment_only(name_lc):
+        if _is_equipment_only_name(name_lc):
             # le matériel seul n’entre pas dans la consigne
             continue
 
@@ -86,59 +150,11 @@ def compute_deposits_split(client_id: int):
             keg_qty += s * int(qty)
             keg_eur += s * float(dep_val) * int(qty)
 
-    # On retourne les montants (peuvent être négatifs si "sur-retours" historiques)
-    return (cup_eur, cup_qty, keg_eur, keg_qty)
-# --- utils.py : AJOUTS COMPATIBLES ---
+    return (round(cup_eur, 2), int(cup_qty), round(keg_eur, 2), int(keg_qty))
 
-from __future__ import annotations
-from datetime import datetime, timezone
-from typing import Dict, List, Tuple
-from types import SimpleNamespace
 
-from sqlalchemy import func, and_
-from models import db, Client, Product, Variant, Movement, Inventory, ReorderRule
+# -------------------- Inventaire --------------------
 
-# ---------- Helpers de texte / typage produits ----------
-def _lc(s: str | None) -> str:
-    return (s or "").strip().lower()
-
-def _is_cup_product(p: Product | None) -> bool:
-    if not p:
-        return False
-    n = _lc(p.name)
-    if ("ecocup" in n or "eco cup" in n or "gobelet" in n):
-        # hors lavage / perdu
-        if any(w in n for w in ["lavage", "wash", "perdu", "perte", "clean"]):
-            return False
-        return True
-    return False
-
-def _is_cup_maintenance(p: Product | None) -> bool:
-    if not p:
-        return False
-    n = _lc(p.name)
-    return ("ecocup" in n or "eco cup" in n or "gobelet" in n) and any(
-        w in n for w in ["lavage", "wash", "perdu", "perte", "clean"]
-    )
-
-def _is_equipment_only(p: Product | None) -> bool:
-    if not p:
-        return False
-    n = _lc(p.name)
-    return (("matériel" in n or "materiel" in n) and "seul" in n)
-
-def default_deposit_for_product(p: Product | None) -> float:
-    """Valeur par défaut de consigne utilisée par app.py si non saisie en ligne."""
-    if _is_equipment_only(p):
-        return 0.0
-    if _is_cup_product(p):
-        return 1.0
-    return 30.0
-
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-# ---------- Inventaire ----------
 def get_or_create_inventory(variant_id: int) -> Inventory:
     inv = Inventory.query.filter_by(variant_id=variant_id).first()
     if not inv:
@@ -147,8 +163,14 @@ def get_or_create_inventory(variant_id: int) -> Inventory:
         db.session.flush()
     return inv
 
-# ---------- Ouvertures par variante (enjeu) ----------
+
+# -------------------- Calculs d’état client --------------------
+
 def _open_qty_by_variant(client_id: int) -> Dict[int, int]:
+    """
+    Pour un client, retourne {variant_id: OUT - (IN + DEFECT + FULL)}.
+    > 0 => encore en jeu chez le client.
+    """
     out_rows = dict(
         db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
         .filter(Movement.client_id == client_id, Movement.type == "OUT")
@@ -164,8 +186,14 @@ def _open_qty_by_variant(client_id: int) -> Dict[int, int]:
     all_vids = set(out_rows) | set(back_rows)
     return {vid: int(out_rows.get(vid, 0)) - int(back_rows.get(vid, 0)) for vid in all_vids}
 
-# ---------- Totaux bière (litres & TTC) pour un client ----------
+
 def _beer_totals_for_client(client_id: int) -> Tuple[float, float]:
+    """
+    Calcule :
+      - liters_out_cum : total de litres livrés (OUT) sur des variantes volumétriques
+      - beer_eur : somme TTC facturée (OUT) sur ces variantes
+    Exclut ecocup maintenance et matériel seul.
+    """
     q = (
         db.session.query(
             func.coalesce(func.sum(Movement.qty * func.coalesce(Variant.size_l, 0)), 0),
@@ -183,38 +211,44 @@ def _beer_totals_for_client(client_id: int) -> Tuple[float, float]:
                 | name_lc.like("%wash%") | name_lc.like("%clean%"))
     is_equip = and_((name_lc.like("%matériel%") | name_lc.like("%materiel%")), name_lc.like("%seul%"))
 
-    # on exclut ecocup maintenance et matériel seul du "beer"
     q = q.filter(~and_(is_cup, is_maint)).filter(~is_equip)
 
     liters_out, beer_eur = q.one()
     return float(liters_out or 0.0), float(beer_eur or 0.0)
 
-# ---------- Résumés pour les vues ----------
+
 def summarize_client_detail(c: Client) -> Dict:
     """
-    Détails client : exploite TA compute_deposits_split existante.
-    Renvoie aussi la séparation consigne Ecocup vs Fûts.
+    Vue 'détails client' consolidée.
+    Renvoie (entre autres) :
+      - liters_out_cum, beer_eur
+      - deposit_eur total + split Ecocup/Fûts
+      - cup_qty_in_play, keg_qty_in_play
     """
-    # on réutilise ta fonction existante
     dep_cup, qty_cup, dep_keg, qty_keg = compute_deposits_split(c.id)
     liters_out_cum, beer_eur = _beer_totals_for_client(c.id)
+    deposit_total = (dep_cup or 0.0) + (dep_keg or 0.0)
 
     return {
         "liters_out_cum": round(liters_out_cum, 1),
         "beer_eur": round(beer_eur, 2),
-        "deposit_eur": round((dep_cup or 0.0) + (dep_keg or 0.0), 2),
+        "deposit_eur": round(deposit_total, 2),
         "deposit_cup_eur": round(dep_cup or 0.0, 2),
         "deposit_keg_eur": round(dep_keg or 0.0, 2),
         "cup_qty_in_play": int(qty_cup or 0),
         "keg_qty_in_play": int(qty_keg or 0),
-        "equipment": {},
+        "equipment": {},  # extension future
     }
 
+
 def summarize_client_for_index(c: Client) -> Dict:
-    """Résumé compact pour la page d’accueil."""
+    """
+    Résumé compact pour la page d’accueil.
+    """
     dep_cup, qty_cup, dep_keg, qty_keg = compute_deposits_split(c.id)
     liters_out_cum, beer_eur = _beer_totals_for_client(c.id)
-    open_total = int((qty_cup or 0) + (qty_keg or 0))
+
+    open_total = int((qty_cup or 0) + (qty_keg or 0))  # (hors matériel)
     return {
         "client": c,
         "open_total": open_total,
@@ -227,7 +261,11 @@ def summarize_client_for_index(c: Client) -> Dict:
         "beer_eur": round(beer_eur or 0.0, 2),
     }
 
+
 def summarize_totals(cards: List[Dict]) -> Dict:
+    """
+    Totaux agrégés d’accueil à partir des cartes.
+    """
     return dict(
         total_clients=len(cards),
         total_open=sum(c.get("open_total", 0) for c in cards),
@@ -238,10 +276,14 @@ def summarize_totals(cards: List[Dict]) -> Dict:
         beer_eur=round(sum(c.get("beer_eur", 0.0) for c in cards), 2),
     )
 
-# ---------- Stock & réassort ----------
+
+# -------------------- Réassort & Stock --------------------
+
 def get_stock_items() -> List[Tuple[Variant, Product, int, int]]:
     """
-    Retourne [(Variant, Product, inv_qty, min_qty)] en masquant l’ecocup maintenance.
+    Liste le stock sous forme [(Variant, Product, inv_qty, min_qty), ...]
+    inv_qty=0 et min_qty=0 par défaut si absents.
+    Masque l’Ecocup maintenance (lavage/perdu).
     """
     inv_sq = db.session.query(
         Inventory.variant_id.label("vid"),
@@ -267,22 +309,27 @@ def get_stock_items() -> List[Tuple[Variant, Product, int, int]]:
         .all()
     )
 
-    def _hide(p: Product) -> bool:
+    def _is_hidden(p: Product) -> bool:
         return _is_cup_maintenance(p)
 
-    return [
-        (v, p, int(inv_qty or 0), int(min_qty or 0))
-        for (v, p, inv_qty, min_qty) in rows
-        if not _hide(p)
-    ]
+    filtered = [(v, p, int(inv_qty or 0), int(min_qty or 0))
+                for (v, p, inv_qty, min_qty) in rows
+                if not _is_hidden(p)]
+    return filtered
+
 
 def compute_reorder_alerts() -> List[SimpleNamespace]:
     """
-    Alerte réassort pour macros Jinja : objets avec .product et .variant.
+    Construit la liste d’alertes réassort pour le tableau de bord.
+    On renvoie des objets avec .product et .variant pour coller aux macros Jinja :
+      a.product.name / a.variant.size_l
     """
     alerts: List[SimpleNamespace] = []
     for (v, p, inv_qty, min_qty) in get_stock_items():
-        if (min_qty or 0) > 0 and (inv_qty or 0) < (min_qty or 0):
+        # On ignore les variantes sans règle de réassort (min_qty <= 0)
+        if (min_qty or 0) <= 0:
+            continue
+        if (inv_qty or 0) < (min_qty or 0):
             alerts.append(
                 SimpleNamespace(
                     product=p,
