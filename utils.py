@@ -27,7 +27,8 @@ def _is_cup(name: str | None) -> bool:
     return is_cup and not is_maintenance
 
 def _sign_for_type(mtype: str) -> int:
-    # OUT = on met chez le client (+1), IN/DEFECT/FULL = on récupère (-1)
+    # OUT = on met chez le client (+1)
+    # IN/DEFECT/FULL = on récupère (-1)
     if mtype == "OUT":
         return 1
     if mtype in ("IN", "DEFECT", "FULL"):
@@ -67,12 +68,12 @@ def compute_deposits_split(client_id: int) -> Tuple[float, int, float, int]:
             continue
 
         if _is_equipment_only(pname):
-            # matériel seul : ne compte pas dans les consignes
+            # le matériel seul ne compte pas dans la consigne
             continue
 
         is_cup = _is_cup(pname)
 
-        # fallback consigne
+        # fallback consigne si non saisie sur la ligne
         dep_val = None
         if dep is not None:
             try:
@@ -89,7 +90,7 @@ def compute_deposits_split(client_id: int) -> Tuple[float, int, float, int]:
             keg_qty += s * int(qty)
             keg_eur += s * dep_val * int(qty)
 
-    return (cup_eur, cup_qty, keg_eur, keg_qty)
+    return (round(cup_eur, 2), int(cup_qty), round(keg_eur, 2), int(keg_qty))
 
 # ---------- Matériel prêté (parser les notes) ----------
 
@@ -136,11 +137,11 @@ def compute_equipment_in_play(client_id: int) -> Dict[str, int]:
             acc[k] = 0
     return acc
 
-# ---------- Fûts en jeu (nombre) ----------
+# ---------- Fûts en jeu ----------
 
 def open_kegs_qty_for_client(client_id: int) -> int:
     """
-    Renvoie le nombre de fûts en jeu chez un client (tout sauf ecocup et matériel seul).
+    Renvoie le nombre de fûts en jeu chez un client (exclut gobelets et 'matériel seul').
     """
     rows = (
         db.session.query(Movement.qty, Movement.type, Product.name)
@@ -158,6 +159,45 @@ def open_kegs_qty_for_client(client_id: int) -> int:
         s = _sign_for_type(mtype)
         total += s * int(qty)
     return int(total)
+
+def open_kegs_by_variant(client_id: int) -> List[Dict]:
+    """
+    Détail par variante (produit/taille) des fûts en jeu (OUT - IN/DEFECT/FULL),
+    en excluant gobelets et matériel seul.
+    """
+    out_rows = dict(
+        db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
+        .filter(Movement.client_id == client_id, Movement.type == "OUT")
+        .group_by(Movement.variant_id)
+        .all()
+    )
+    back_rows = dict(
+        db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
+        .filter(Movement.client_id == client_id, Movement.type.in_(["IN", "DEFECT", "FULL"]))
+        .group_by(Movement.variant_id)
+        .all()
+    )
+    all_vids = set(out_rows) | set(back_rows)
+    out = []
+    for vid in all_vids:
+        open_q = int(out_rows.get(vid, 0)) - int(back_rows.get(vid, 0))
+        if open_q <= 0:
+            continue
+        v = Variant.query.get(vid)
+        if not v:
+            continue
+        p = v.product
+        pname = p.name if p else ""
+        if _is_cup(pname) or _is_equipment_only(pname):
+            continue
+        out.append({
+            "variant_id": vid,
+            "product_name": pname or "",
+            "size_l": v.size_l,
+            "qty_open": open_q,
+        })
+    out.sort(key=lambda r: (r["product_name"].lower(), r["size_l"] or 0))
+    return out
 
 # ---------- Récap accueil par client ----------
 
@@ -193,8 +233,8 @@ def summarize_client_for_index(client: Client) -> Dict:
             pass
 
     return {
-        "id": client.id,                 # pour compatibilité
-        "client_id": client.id,          # pour accès via dict.get dans le template
+        "id": client.id,
+        "client_id": client.id,
         "name": client.name,
         "equipment": equipment,
         "kegs_qty": kegs_qty,
@@ -213,12 +253,35 @@ def summarize_totals(cards: List[Dict]) -> Dict[str, float]:
         "deposits_keg_eur": round(total_keg, 2),
     }
 
+# ---------- Détail fiche client ----------
+
+def summarize_client_detail(client: Client) -> Dict:
+    """
+    Données complètes pour la fiche client.
+    """
+    cup_eur, cup_qty, keg_eur, keg_qty = compute_deposits_split(client.id)
+    equipment = compute_equipment_in_play(client.id)
+    kegs_qty = open_kegs_qty_for_client(client.id)
+    open_rows = open_kegs_by_variant(client.id)
+
+    return {
+        "client_id": client.id,
+        "name": client.name,
+        "equipment": equipment,
+        "kegs_qty": kegs_qty,
+        "deposits": {
+            "cup_eur": cup_eur, "cup_qty": cup_qty,
+            "keg_eur": keg_eur, "keg_qty": keg_qty,
+        },
+        "open_by_variant": open_rows,  # liste de dicts
+    }
+
 # ---------- Stock / catalogue ----------
 
 def get_stock_items():
     """
     Retourne [(Variant, Product, inv_qty, min_qty)].
-    Ici on ne dépend PAS d'un champ Product.min_qty (absent chez toi) -> min_qty = 0.
+    Ici on ne dépend PAS d'un champ Product.min_qty -> min_qty = 0.
     """
     rows = (
         db.session.query(
@@ -231,7 +294,6 @@ def get_stock_items():
         .order_by(Product.name.asc(), Variant.size_l.asc())
         .all()
     )
-    # Adapter au format attendu (avec min_qty en 0)
     return [(v, p, inv_qty, 0) for (v, p, inv_qty) in rows]
 
 def compute_reorder_alerts() -> List[Dict]:
