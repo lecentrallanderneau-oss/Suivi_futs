@@ -1,64 +1,48 @@
-{# ========= Macros UI partagées ========= #}
-
-{# Carte statistique simple #}
-{% macro stat_card(title, value) -%}
-<div class="card shadow-sm">
-  <div class="card-body py-3">
-    <div class="text-muted small mb-1">{{ title }}</div>
-    <div class="h4 mb-0">{{ value }}</div>
-  </div>
-</div>
-{%- endmacro %}
-
-{# Badges matériel condensés pour la liste d’accueil #}
-{% macro equipment_badges(eq) -%}
-  {% set t = eq.tireuse or 0 %}
-  {% set co2 = eq.co2 or 0 %}
-  {% set cpt = eq.comptoir or 0 %}
-  {% set ton = eq.tonnelle or 0 %}
-  {% set eco = eq.ecocup or 0 %}
-  {% set has_any = (t>0 or co2>0 or cpt>0 or ton>0 or eco>0) %}
-
-  <div class="mt-2 d-flex flex-wrap" style="gap:.4rem;">
-    {% if t>0   %}<span class="chip chip-gray">Tireuse × {{ t }}</span>{% endif %}
-    {% if co2>0 %}<span class="chip chip-gray">CO₂ × {{ co2 }}</span>{% endif %}
-    {% if cpt>0 %}<span class="chip chip-gray">Comptoir × {{ cpt }}</span>{% endif %}
-    {% if ton>0 %}<span class="chip chip-gray">Tonnelle × {{ ton }}</span>{% endif %}
-    {% if eco>0 %}<span class="chip chip-gray">Ecocup × {{ eco }}</span>{% endif %}
-    {% if not has_any %}
-      <span class="text-muted small">Aucun matériel en prêt</span>
-    {% endif %}
-  </div>
-{%- endmacro %}
-
-{# Liste détaillée matériel pour fiche client #}
-{% macro equipment_stats(eq) -%}
-<ul class="list-unstyled mb-0">
-  <li>Tireuse : <strong>{{ eq.tireuse or 0 }}</strong></li>
-  <li>CO₂ : <strong>{{ eq.co2 or 0 }}</strong></li>
-  <li>Comptoir : <strong>{{ eq.comptoir or 0 }}</strong></li>
-  <li>Tonnelle : <strong>{{ eq.tonnelle or 0 }}</strong></li>
-  <li>Ecocup : <strong>{{ eq.ecocup or 0 }}</strong></li>
-</ul>
-{% if (eq.tireuse or 0)==0 and (eq.co2 or 0)==0 and (eq.comptoir or 0)==0 and (eq.tonnelle or 0)==0 and (eq.ecocup or 0)==0 %}
-  <div class="text-muted small mt-2">Aucun matériel actuellement en prêt.</div>
-{% endif %}
-{%- endmacro %}
-
-{# Alerte réassort accueil/stock #}
+{# templates/_macros.html #}
 {% macro alerts_list(alerts) -%}
   {% if alerts and alerts|length > 0 %}
-    <div class="alert alert-warning d-flex flex-column gap-1">
-      <div class="fw-bold">⚠️ Réassort conseillé</div>
-      <ul class="mb-0">
-        {% for a in alerts %}
-          <li>
-            {{ a.product.name }}{% if a.variant.size_l %} — {{ a.variant.size_l }} L{% endif %} :
-            stock {{ a.qty }}, min {{ a.min_qty }}, à commander {{ a.need }}
-          </li>
-        {% endfor %}
-      </ul>
-      <a href="{{ url_for('stock') }}" class="small">Mettre à jour l’inventaire ›</a>
-    </div>
+  <div class="alert alert-warning">
+    <strong>Réassort :</strong>
+    <ul class="mb-0">
+      {% for a in alerts %}
+        <li>
+          {{ a.product.name }}
+          {% if a.variant.size_l %} — {{ a.variant.size_l }} L{% endif %} :
+          manque {{ a.missing }} (stock {{ a.inv_qty }}/min {{ a.min_qty }})
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
   {% endif %}
+{%- endmacro %}
+
+{% macro equipment_badges(eq) -%}
+  {% if not eq %}{% set eq = {} %}{% endif %}
+  {% set t = eq.tireuse or 0 %}
+  {% set c2 = eq.co2 or 0 %}
+  {% set cpt = eq.comptoir or 0 %}
+  {% set ton = eq.tonnelle or 0 %}
+  <div class="equip-badges">
+    {% if t > 0 %}<span class="badge badge-eq">Tireuse × {{ t }}</span>{% endif %}
+    {% if c2 > 0 %}<span class="badge badge-eq">CO₂ × {{ c2 }}</span>{% endif %}
+    {% if cpt > 0 %}<span class="badge badge-eq">Comptoir × {{ cpt }}</span>{% endif %}
+    {% if ton > 0 %}<span class="badge badge-eq">Tonnelle × {{ ton }}</span>{% endif %}
+  </div>
+{%- endmacro %}
+
+{# NOUVEAU : badges de consigne séparées Fûts / Gobelets #}
+{% macro deposit_split_badges(card) -%}
+  {# Valeurs tolérantes si clés manquantes #}
+  {% set keg_eur = (card.deposit_keg_eur or 0) | round(2) %}
+  {% set keg_qty = card.keg_qty_in_play or 0 %}
+  {% set cup_eur = (card.deposit_cup_eur or 0) | round(2) %}
+  {% set cup_qty = card.cup_qty_in_play or 0 %}
+  <div class="consigne-badges">
+    <span class="badge badge-keg" title="Consigne fûts (€) et nombre en jeu">
+      Fûts : {{ keg_eur }} € ({{ keg_qty }})
+    </span>
+    <span class="badge badge-cup" title="Consigne gobelets (€) et nombre en jeu">
+      Gobelets : {{ cup_eur }} € ({{ cup_qty }})
+    </span>
+  </div>
 {%- endmacro %}
