@@ -205,32 +205,117 @@ def create_app():
         )
         return query.filter(~and_(is_cup, is_maintenance))
 
-    @app.route("/catalog")
+    # ----------------- CATALOGUE -----------------
+    @app.route("/catalog", methods=["GET", "POST"])
     def catalog():
         """
-        Donne au template tous les formats possibles :
-        - rows : liste de (Variant, Product)
-        - variants : liste de Variant
-        - items : objets avec attributs .variant / .product
-        + alerts : certains templates l'affichent via _macros.html
+        - GET : affiche la liste des références (comme Stock mais sans quantités) + formulaires :
+            * mise à jour des prix
+            * ajout d'une référence (nom, volume, prix)
+        - POST :
+            * action=update_prices -> met à jour les prix existants
+            * action=create        -> crée produit/variante (ou met à jour si existe)
         """
+        if request.method == "POST":
+            action = request.form.get("action")
+
+            # --- Mise à jour en masse des prix ---
+            if action == "update_prices":
+                updated = 0
+                for k, v in request.form.items():
+                    if not k.startswith("price_"):
+                        continue
+                    try:
+                        vid = int(k.split("_", 1)[1])
+                    except Exception:
+                        continue
+                    price = request.form.get(k)
+                    if price in ("", None):
+                        # autoriser prix nul -> None, sinon garder ancien
+                        new_price = None
+                    else:
+                        try:
+                            new_price = float(price.replace(",", "."))
+                        except Exception:
+                            continue
+                    var = Variant.query.get(vid)
+                    if not var:
+                        continue
+                    var.price_ttc = new_price
+                    updated += 1
+                db.session.commit()
+                flash(f"Prix mis à jour ({updated} lignes).", "success")
+                return redirect(url_for("catalog"))
+
+            # --- Création d'une référence ---
+            if action == "create":
+                name = (request.form.get("name") or "").strip()
+                size_l_raw = request.form.get("size_l")
+                price_raw = request.form.get("price_ttc")
+
+                if not name:
+                    flash("Le nom du produit est obligatoire.", "warning")
+                    return redirect(url_for("catalog"))
+
+                # Ecocup/gobelet -> size_l forcé à 1
+                is_cup_name = any(s in name.lower() for s in ["ecocup", "eco cup", "gobelet"])
+                if is_cup_name:
+                    size_l = 1
+                else:
+                    try:
+                        size_l = int(size_l_raw) if size_l_raw not in ("", None) else None
+                    except Exception:
+                        size_l = None
+
+                if size_l is None:
+                    flash("Le volume (L) est obligatoire (sauf Ecocup où il est automatique).", "warning")
+                    return redirect(url_for("catalog"))
+
+                try:
+                    price_ttc = float(price_raw.replace(",", ".")) if price_raw not in ("", None) else 0.0
+                except Exception:
+                    price_ttc = 0.0
+
+                # Trouver / créer le produit
+                p = Product.query.filter(func.lower(Product.name) == name.lower()).first()
+                if not p:
+                    p = Product(name=name)
+                    db.session.add(p)
+                    db.session.flush()
+
+                # Trouver / créer la variante (product_id + size_l)
+                v = Variant.query.filter_by(product_id=p.id, size_l=size_l).first()
+                if v:
+                    v.price_ttc = price_ttc
+                else:
+                    v = Variant(product_id=p.id, size_l=size_l, price_ttc=price_ttc)
+                    db.session.add(v)
+                    db.session.flush()  # avoir v.id
+
+                # Optionnel : créer un enregistrement d'inventaire à 0 si besoin
+                U.get_or_create_inventory(v.id)
+
+                db.session.commit()
+                flash(f"Référence {'mise à jour' if v else 'créée'} avec succès.", "success")
+                return redirect(url_for("catalog"))
+
+            # Action inconnue -> ignorer
+            return redirect(url_for("catalog"))
+
+        # GET : lister comme Stock (sans quantités), trier par nom & volume
         q = (
             db.session.query(Variant, Product)
             .join(Product, Variant.product_id == Product.id)
             .order_by(Product.name, Variant.size_l)
         )
         q = _hide_ecocup_maintenance(q)
-        rows = q.all()                       # [(Variant, Product), ...]
-        variants = [v for (v, _p) in rows]   # [Variant, ...]
+        rows = q.all()                       # [(Variant, Product)]
         items = [SimpleNamespace(variant=v, product=p) for (v, p) in rows]
-
-        # Fournir aussi alerts si le template l'affiche en haut
-        alerts = U.compute_reorder_alerts()
+        alerts = U.compute_reorder_alerts()  # si le template appelle un macro d'alertes
 
         return render_template(
             "catalog.html",
             rows=rows,
-            variants=variants,
             items=items,
             alerts=alerts,
         )
@@ -398,14 +483,14 @@ def create_app():
                     up = None
                     if i < len(unit_prices) and unit_prices[i] not in ("", None):
                         try:
-                            up = float(unit_prices[i])
+                            up = float(unit_prices[i].replace(",", "."))
                         except Exception:
                             up = None
 
                     dep = None
                     if i < len(deposits) and deposits[i] not in ("", None):
                         try:
-                            dep = float(deposits[i])
+                            dep = float(deposits[i].replace(",", "."))
                         except Exception:
                             dep = None
 
