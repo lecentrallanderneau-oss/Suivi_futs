@@ -1,26 +1,89 @@
 {% extends "base.html" %}
-{% block title %}Catalogue · Gestion fûts{% endblock %}
+{% block title %}Catalogue{% endblock %}
+
 {% block content %}
-<h1 class="h3">Catalogue</h1>
-<hr>
-<table class="table table-sm table-striped align-middle">
-  <thead>
-    <tr>
-      <th>Produit</th>
-      <th>Contenance (L)</th>
-      <th class="text-end">Prix TTC (€)</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for name, size_l, price in rows %}
-      <tr>
-        <td>{{ name }}</td>
-        <td>{{ size_l }}</td>
-        <td class="text-end">{{ '%.2f'|format(price or 0) }}</td>
-      </tr>
-    {% else %}
-      <tr><td colspan="3" class="text-center text-muted">Aucune donnée.</td></tr>
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h1 class="h3 mb-0">Catalogue</h1>
+  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('stock') }}">Aller au stock</a>
+</div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for category, message in messages %}
+      <div class="alert alert-{{ 'warning' if category=='warning' else ('danger' if category=='danger' else ('success' if category=='success' else 'secondary')) }} alert-dismissible fade show" role="alert">
+        {{ message }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fermer"></button>
+      </div>
     {% endfor %}
-  </tbody>
-</table>
+  {% endif %}
+{% endwith %}
+
+<div class="card mb-4">
+  <div class="card-header">Références existantes</div>
+  <div class="card-body p-0">
+    <form method="post">
+      <input type="hidden" name="action" value="update_prices">
+      <table class="table table-hover table-sm mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th style="width:45%">Produit</th>
+            <th style="width:15%">Volume</th>
+            <th style="width:20%">Prix TTC</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for it in items %}
+          <tr>
+            <td>{{ it.product.name }}</td>
+            <td>
+              {# Pour Ecocup : pas d'affichage de "1 L" #}
+              {% if 'ecocup' in it.product.name|lower or 'gobelet' in it.product.name|lower %}
+                —
+              {% else %}
+                {{ it.variant.size_l }} L
+              {% endif %}
+            </td>
+            <td>
+              <input
+                type="number" step="0.01" min="0"
+                class="form-control form-control-sm"
+                name="price_{{ it.variant.id }}"
+                value="{{ it.variant.price_ttc if it.variant.price_ttc is not none else '' }}"
+                placeholder="0,00">
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <div class="p-3 text-end">
+        <button class="btn btn-primary btn-sm">Enregistrer les prix</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Ajouter une nouvelle référence</div>
+  <div class="card-body">
+    <form method="post" class="row g-2">
+      <input type="hidden" name="action" value="create">
+      <div class="col-md-5">
+        <label class="form-label">Nom du produit</label>
+        <input class="form-control" name="name" placeholder="ex : Pils, IPA, Ecocup" required>
+        <div class="form-text">Pour Ecocup, le volume est mis automatiquement à 1.</div>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">Volume (L)</label>
+        <input class="form-control" type="number" step="1" min="0" name="size_l" placeholder="ex : 30">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">Prix TTC</label>
+        <input class="form-control" type="number" step="0.01" min="0" name="price_ttc" placeholder="ex : 105.90">
+      </div>
+      <div class="col-md-3 d-flex align-items-end">
+        <button class="btn btn-success">Créer la référence</button>
+      </div>
+    </form>
+  </div>
+</div>
 {% endblock %}
