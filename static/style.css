@@ -55,11 +55,32 @@ h1,h2,h3{margin:0 0 .6rem 0;font-weight:700;}
 .alert-list{margin:6px 0 0 18px;padding:0;}
 .alert-list li{margin:2px 0;}
 
+/* --- Totaux (accueil) --- */
+.totals-card .card-header{display:flex;align-items:center;gap:.5rem;}
+.totals-grid{
+  display:grid;
+  grid-template-columns: repeat(4, minmax(140px,1fr));
+  gap:12px;
+}
+.totals-item{
+  background:#fafbfc;
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:10px 12px;
+}
+.totals-label{font-size:.88rem;color:var(--muted);margin-bottom:4px;}
+.totals-value{font-weight:700;font-size:1.05rem;}
+.totals-sum{background:#eef5ff;border-color:#d7e6ff;}
+
 /* Responsive */
 @media (max-width: 900px){
   .list-row{grid-template-columns:1fr;align-items:flex-start;}
   .col-eq{text-align:left;}
+  .totals-grid{grid-template-columns:1fr 1fr;}
+}
+@media (max-width: 560px){
+  .totals-grid{grid-template-columns:1fr;}
 }
 
-/* Utility spacing so l’ensemble ressemble aux autres pages */
+/* Utility */
 .page-inner{padding:8px 0;}
