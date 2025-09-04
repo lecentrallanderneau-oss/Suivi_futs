@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Dict, Tuple, List, Iterable, Optional
+from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import func
 
 from models import db, Client, Product, Variant, Movement, Inventory
 
 
-# ---------- Helpers généraux ----------
+# -------- Helpers --------
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _lc(s: Optional[str]) -> str:
+    return (s or "").lower().strip()
 
 
 def format_eur(x: Optional[float]) -> str:
@@ -22,11 +26,7 @@ def format_eur(x: Optional[float]) -> str:
         return "0.00 €"
 
 
-def _lc(s: Optional[str]) -> str:
-    return (s or "").lower().strip()
-
-
-# ---------- Détection produit “écocup” / “matériel seul” ----------
+# -------- Détection produit (écocup / matériel seul) --------
 
 def is_cup_product_name(name: str) -> bool:
     n = _lc(name)
@@ -43,12 +43,10 @@ def is_equipment_only_name(name: str) -> bool:
 
 
 def default_deposit_for_product(product: Product) -> float:
-    if is_cup_product_name(product.name):
-        return 1.0
-    return 30.0
+    return 1.0 if is_cup_product_name(product.name) else 30.0
 
 
-# ---------- Inventaire (bar) ----------
+# -------- Inventaire (bar) --------
 
 def get_or_create_inventory(variant_id: int) -> Inventory:
     inv = Inventory.query.filter_by(variant_id=variant_id).first()
@@ -59,48 +57,35 @@ def get_or_create_inventory(variant_id: int) -> Inventory:
     return inv
 
 
-# ---------- Matériel prêté (tireuse/co2/comptoir/tonnelle) ----------
+# -------- Matériel prêté (via notes) --------
 
 _EQ_KEYS = ("tireuse", "co2", "comptoir", "tonnelle")
 
 
 def parse_equipment_notes(notes: Optional[str]) -> Dict[str, int]:
-    """
-    Extrait un dict { 'tireuse': n, 'co2': n, 'comptoir': n, 'tonnelle': n }
-    depuis la chaîne de notes. Tolérant aux autres textes.
-    """
     res = {k: 0 for k in _EQ_KEYS}
     if not notes:
         return res
-    parts = [p.strip() for p in notes.split(";") if p and "=" in p]
-    for p in parts:
+    for part in notes.split(";"):
+        if "=" not in part:
+            continue
         try:
-            k, v = p.split("=", 1)
+            k, v = part.split("=", 1)
             k = _lc(k)
             if k in res:
                 res[k] += int(str(v).strip())
         except Exception:
-            # Ignore tout ce qui n'est pas “clé=valeur int”
             continue
     return res
 
 
 def equipment_in_play_for_client(client_id: int) -> Dict[str, int]:
-    """
-    Calcule le matériel encore “en jeu” pour un client en cumulant tous les mouvements :
-    - OUT  => +
-    - IN / DEFECT / FULL => −
-    Les quantités sont lues dans Movement.notes via parse_equipment_notes().
-    Le matériel “Matériel seul” saisi via le wizard est encodé dans ces notes.
-    """
     totals = {k: 0 for k in _EQ_KEYS}
-
-    rows: List[Tuple[str, Optional[str]]] = (
+    rows = (
         db.session.query(Movement.type, Movement.notes)
         .filter(Movement.client_id == client_id)
         .all()
     )
-
     for mtype, notes in rows:
         if mtype == "OUT":
             s = 1
@@ -110,31 +95,24 @@ def equipment_in_play_for_client(client_id: int) -> Dict[str, int]:
             s = 0
         if s == 0:
             continue
-
         parsed = parse_equipment_notes(notes)
         for k in _EQ_KEYS:
             totals[k] += s * int(parsed.get(k, 0))
-
-    # pas de négatifs affichés (sécurité si historique atypique)
-    for k in list(totals):
+    # pas de négatifs
+    for k in totals:
         if totals[k] < 0:
             totals[k] = 0
-
     return totals
 
 
-# Alias compat (si certaines vues appellent encore l’ancienne fonction)
+# compat
 def compute_equipment_in_play(client_id: int) -> Dict[str, int]:
     return equipment_in_play_for_client(client_id)
 
 
-# ---------- Consignes séparées (gobelets vs fûts) ----------
+# -------- Consignes (séparées gobelets / fûts) --------
 
 def compute_deposits_split(client_id: int) -> Tuple[float, int, float, int]:
-    """
-    Retourne (deposit_cup_eur, cup_qty_in_play, deposit_keg_eur, keg_qty_in_play)
-    en séparant consigne Ecocup vs consigne Fûts.
-    """
     rows = (
         db.session.query(
             Movement.qty,
@@ -170,7 +148,7 @@ def compute_deposits_split(client_id: int) -> Tuple[float, int, float, int]:
 
         is_cup = is_cup_product_name(name_lc)
 
-        dep_val = None
+        dep_val: Optional[float] = None
         if dep is not None:
             try:
                 dep_val = float(dep)
@@ -189,28 +167,17 @@ def compute_deposits_split(client_id: int) -> Tuple[float, int, float, int]:
     return (cup_eur, cup_qty, keg_eur, keg_qty)
 
 
-# ---------- Résumé client pour l’accueil ----------
+# -------- Résumés pour vues --------
 
 def summarize_client_for_index(client: Client) -> Dict:
-    """
-    Retourne un dict prêt pour index.html :
-      {
-        id, name,
-        billed_beer_eur,  # total € bière (OUT uniquement)
-        deposits_cup_eur, deposits_keg_eur,
-        equipment: {tireuse, co2, comptoir, tonnelle}
-      }
-    """
     billed = (
         db.session.query(func.coalesce(func.sum(Movement.qty * Movement.unit_price_ttc), 0.0))
         .filter(Movement.client_id == client.id, Movement.type == "OUT")
         .scalar()
         or 0.0
     )
-
     dep_cup_eur, _cup_qty, dep_keg_eur, _keg_qty = compute_deposits_split(client.id)
     eq = equipment_in_play_for_client(client.id)
-
     return {
         "id": client.id,
         "name": client.name,
@@ -221,47 +188,100 @@ def summarize_client_for_index(client: Client) -> Dict:
     }
 
 
-# ---------- Stock & alertes ----------
+def summarize_totals(cards: List[Dict]) -> Dict[str, float]:
+    out = {"billed_beer_eur": 0.0, "deposits_cup_eur": 0.0, "deposits_keg_eur": 0.0}
+    for c in cards:
+        out["billed_beer_eur"] += float(c.get("billed_beer_eur", 0) or 0)
+        out["deposits_cup_eur"] += float(c.get("deposits_cup_eur", 0) or 0)
+        out["deposits_keg_eur"] += float(c.get("deposits_keg_eur", 0) or 0)
+    return out
+
+
+def summarize_client_detail(client: Client) -> Dict:
+    liters = (
+        db.session.query(func.coalesce(func.sum(Movement.qty * Variant.size_l), 0))
+        .join(Variant, Movement.variant_id == Variant.id)
+        .filter(Movement.client_id == client.id, Movement.type == "OUT")
+        .scalar()
+        or 0
+    )
+    billed = (
+        db.session.query(func.coalesce(func.sum(Movement.qty * Movement.unit_price_ttc), 0.0))
+        .filter(Movement.client_id == client.id, Movement.type == "OUT")
+        .scalar()
+        or 0.0
+    )
+    dep_cup_eur, dep_cup_qty, dep_keg_eur, dep_keg_qty = compute_deposits_split(client.id)
+    eq = equipment_in_play_for_client(client.id)
+
+    # historique
+    q = (
+        db.session.query(Movement, Variant, Product)
+        .join(Variant, Movement.variant_id == Variant.id)
+        .join(Product, Variant.product_id == Product.id)
+        .filter(Movement.client_id == client.id)
+        .order_by(Movement.created_at.desc(), Movement.id.desc())
+    )
+    history = []
+    for m, v, p in q.all():
+        history.append({
+            "id": m.id,
+            "date": m.created_at,
+            "type": m.type,
+            "product": p.name,
+            "size_l": v.size_l,
+            "qty": m.qty,
+            "unit_price_ttc": m.unit_price_ttc,
+            "deposit_per_keg": m.deposit_per_keg,
+            "notes": m.notes,
+        })
+
+    return {
+        "id": client.id,
+        "name": client.name,
+        "liters_delivered": float(liters or 0),
+        "billed_beer_eur": float(billed or 0),
+        "deposits": {
+            "cup_eur": float(dep_cup_eur or 0),
+            "cup_qty": int(dep_cup_qty or 0),
+            "keg_eur": float(dep_keg_eur or 0),
+            "keg_qty": int(dep_keg_qty or 0),
+            "total_eur": float((dep_cup_eur or 0) + (dep_keg_eur or 0)),
+        },
+        "equipment": eq,
+        "history": history,
+    }
+
+
+# -------- Stock & alertes --------
+# (ne dépend pas de Product.min_qty — s’il n’existe pas on met 0)
 
 def get_stock_items():
     """
-    Liste le stock bar par variante.
-    Retourne une liste de tuples (Variant, Product, inv_qty, min_qty)
+    Retourne une liste [(Variant, Product, inv_qty, min_qty)].
+    min_qty = getattr(Product, 'min_qty', 0)
     """
     rows = (
-        db.session.query(
-            Variant,
-            Product,
-            func.coalesce(Inventory.qty, 0).label("inv_qty"),
-            func.coalesce(Product.min_qty, 0).label("min_qty"),
-        )
+        db.session.query(Variant, Product, Inventory.qty)
         .join(Product, Variant.product_id == Product.id)
         .outerjoin(Inventory, Inventory.variant_id == Variant.id)
         .order_by(Product.name.asc(), Variant.size_l.asc())
         .all()
     )
-    return rows
+    out = []
+    for v, p, inv_qty in rows:
+        out.append((v, p, int(inv_qty or 0), int(getattr(p, "min_qty", 0) or 0)))
+    return out
 
 
 def compute_reorder_alerts() -> List[Dict]:
-    """
-    Alimente les alertes de réappro :
-      - variantes dont l’inventaire est < min_qty (si min_qty > 0)
-    """
-    rows = get_stock_items()
     alerts: List[Dict] = []
-    for v, p, inv_qty, min_qty in rows:
+    for v, p, inv_qty, min_qty in get_stock_items():
         try:
-            mi = int(min_qty or 0)
             q = int(inv_qty or 0)
+            mi = int(min_qty or 0)
         except Exception:
-            mi = 0
-            q = 0
+            q, mi = 0, 0
         if mi > 0 and q < mi:
-            alerts.append({
-                "product": p,
-                "variant": v,
-                "current": q,
-                "min": mi,
-            })
+            alerts.append({"product": p, "variant": v, "current": q, "min": mi})
     return alerts
