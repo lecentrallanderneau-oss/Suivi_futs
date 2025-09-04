@@ -1,27 +1,53 @@
-/* === Accueil : liste par client façon “pills” === */
-.header-line{
-  display:flex; align-items:center; justify-content:space-between; gap:1rem;
-}
-.list-rows{ display:flex; flex-direction:column; gap:.75rem; }
-.list-row{
-  display:grid;
-  grid-template-columns: minmax(220px, 1fr) 2fr minmax(220px, 1fr);
-  align-items:center; gap:1rem;
-}
-.col-name a{ color:#1463ff; text-decoration:none; }
-.col-name a:hover{ text-decoration:underline; }
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
-.col-pills{ display:flex; flex-wrap:wrap; gap:.5rem; }
-.pill{
-  display:inline-block; padding:.35rem .7rem;
-  border-radius:999px; background:#f1f3f5; color:#333; border:1px solid #e3e6e9;
-  font-size:.92rem; line-height:1;
-}
-.pill-cup{ background:#e6fff9; border-color:#bdebe1; }
+{% block content %}
+<div class="header-line">
+  <h1>Stock par client</h1>
+  <a class="btn btn-primary" href="{{ url_for('movement_new') }}">+ Saisie</a>
+</div>
+<hr>
 
-.col-eq{ text-align:right; color:#555; }
-.muted{ color:#777; }
-@media (max-width: 900px){
-  .list-row{ grid-template-columns: 1fr; align-items:flex-start; }
-  .col-eq{ text-align:left; }
-}
+{# Alerte réassort #}
+{{ ui.alerts_list(alerts) }}
+
+<div class="list-rows">
+  {% for c in cards %}
+    {# Valeurs sûres #}
+    {% set beer_eur = c.beer_eur or 0 %}
+    {% set deposit_keg_eur = c.deposit_eur or 0 %}
+    {% set deposit_cup_eur = c.deposit_cup_eur or 0 %}
+    {% set eq = c.equipment or {} %}
+    {% set t = eq.tireuse or 0 %}
+    {% set co2 = eq.co2 or 0 %}
+    {% set comptoir = eq.comptoir or 0 %}
+    {% set tonnelle = eq.tonnelle or 0 %}
+
+    <div class="list-row">
+      <div class="col-name">
+        <a class="client-link" href="{{ url_for('client_detail', client_id=c.id) }}">{{ c.name }}</a>
+      </div>
+
+      <div class="col-pills">
+        <span class="pill">fût(s)</span>
+        <span class="pill">Bière facturée: {{ "%.2f"|format(beer_eur) }} €</span>
+        <span class="pill">Consignes fûts: {{ "%.2f"|format(deposit_keg_eur) }} €</span>
+        <span class="pill pill-cup">Consigne gobelets: {{ "%.2f"|format(deposit_cup_eur) }} €</span>
+      </div>
+
+      <div class="col-eq">
+        {% set parts = [] %}
+        {% if t > 0 %}{% set _ = parts.append("Tireuse × " ~ t) %}{% endif %}
+        {% if co2 > 0 %}{% set _ = parts.append("CO₂ × " ~ co2) %}{% endif %}
+        {% if comptoir > 0 %}{% set _ = parts.append("Comptoir × " ~ comptoir) %}{% endif %}
+        {% if tonnelle > 0 %}{% set _ = parts.append("Tonnelle × " ~ tonnelle) %}{% endif %}
+        {% if parts|length == 0 %}
+          <span class="muted">Aucun matériel en prêt</span>
+        {% else %}
+          {{ parts|join(", ") }}
+        {% endif %}
+      </div>
+    </div>
+  {% endfor %}
+</div>
+{% endblock %}
