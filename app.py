@@ -1,10 +1,56 @@
-# --- ROUTE CATALOG ROBUSTE (remplace ton @app.route('/catalog')) ---
-from flask import render_template, request, current_app
-from sqlalchemy import text, inspect
+from __future__ import annotations
+import os
 import logging
 import math
+from typing import List, Dict, Any, Optional
 
-@app.route('/catalog')
+from flask import Flask, render_template, request, redirect, url_for
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from sqlalchemy import text, inspect
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+def _build_db_uri() -> str:
+    uri = os.getenv("DATABASE_URL") or os.getenv("SQLALCHEMY_DATABASE_URI") or "sqlite:///app.db"
+    if uri.startswith("postgres://"):
+        uri = uri.replace("postgres://", "postgresql://", 1)
+    return uri
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", os.urandom(24).hex())
+app.config["SQLALCHEMY_DATABASE_URI"] = _build_db_uri()
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+# Render/Proxy
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+
+# Logs
+if os.getenv("FLASK_ENV") != "development":
+    logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Routes de base
+# -----------------------------------------------------------------------------
+@app.route("/health")
+def health():
+    return "OK", 200
+
+@app.route("/")
+def index():
+    # Redirige vers le stock (accueil par défaut)
+    return redirect(url_for("stock"))
+
+# -----------------------------------------------------------------------------
+# --- ROUTE CATALOG ROBUSTE ---
+# -----------------------------------------------------------------------------
+@app.route("/catalog")
 def catalog():
     try:
         engine = db.session.get_bind()
@@ -87,3 +133,38 @@ def catalog():
                                total=0,
                                table_hint=None), 200
 # --- FIN ROUTE CATALOG ---
+
+# -----------------------------------------------------------------------------
+# STOCK — on ne modifie pas ta logique, tu gardes ton implémentation
+# -----------------------------------------------------------------------------
+@app.route("/stock")
+def stock():
+    try:
+        return render_template("stock.html")
+    except Exception:
+        return "<h1>Stock</h1><p>Template stock.html manquant.</p>", 200
+
+# -----------------------------------------------------------------------------
+# Handlers erreurs
+# -----------------------------------------------------------------------------
+@app.errorhandler(404)
+def not_found(e):
+    try:
+        return render_template("404.html"), 404
+    except Exception:
+        return "404 Not Found", 404
+
+@app.errorhandler(500)
+def internal_error(e):
+    logger.exception("Erreur 500")
+    try:
+        return render_template("500.html"), 500
+    except Exception:
+        return "500 Internal Server Error", 500
+
+# -----------------------------------------------------------------------------
+# Lancement local
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port, debug=os.getenv("FLASK_DEBUG") == "1")
