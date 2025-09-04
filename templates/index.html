@@ -1,4 +1,3 @@
-{# templates/index.html #}
 {% extends "base.html" %}
 {% import "_macros.html" as ui %}
 
@@ -31,6 +30,37 @@
         </div>
       </div>
       {% endfor %}
+    </div>
+  </div>
+</div>
+
+{# --- Bandeau Totaux --- #}
+<div class="card totals-card">
+  <div class="card-header">Totaux</div>
+  <div class="card-body">
+    <div class="totals-grid">
+      <div class="totals-item">
+        <div class="totals-label">Bière facturée</div>
+        <div class="totals-value">{{ ui.eur(totals.billed_beer_eur) }}</div>
+      </div>
+      <div class="totals-item">
+        <div class="totals-label">Consigne gobelets</div>
+        <div class="totals-value">{{ ui.eur(totals.deposits_cup_eur) }}</div>
+      </div>
+      <div class="totals-item">
+        <div class="totals-label">Consignes fûts</div>
+        <div class="totals-value">{{ ui.eur(totals.deposits_keg_eur) }}</div>
+      </div>
+      <div class="totals-item totals-sum">
+        <div class="totals-label">Total général</div>
+        <div class="totals-value">
+          {{ ui.eur(
+            (totals.billed_beer_eur or 0)
+            + (totals.deposits_cup_eur or 0)
+            + (totals.deposits_keg_eur or 0)
+          ) }}
+        </div>
+      </div>
     </div>
   </div>
 </div>
