@@ -1,103 +1,128 @@
 {% extends "base.html" %}
-{% block title %}{{ client.name }}{% endblock %}
+{% block title %}Fiche client{% endblock %}
 
 {% block content %}
-<div class="d-flex align-items-center justify-content-between mb-3">
-  <h1 class="h3 mb-0">{{ client.name }}</h1>
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h3 class="mb-0">{{ client.name }}</h3>
   <div class="d-flex gap-2">
-    <a class="btn btn-sm btn-primary" href="{{ url_for('movement_new', client_id=client.id) }}">➕ Nouveau mouvement</a>
-    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client_edit', client_id=client.id) }}">Modifier</a>
-    <a class="btn btn-sm btn-outline-danger" href="{{ url_for('client_confirm_delete', client_id=client.id) }}">Supprimer</a>
+    <a class="btn btn-outline-primary" href="{{ url_for('movement_new', client_id=client.id) }}">Nouveau mouvement</a>
+    <a class="btn btn-outline-secondary" href="{{ url_for('client_edit', client_id=client.id) }}">Modifier</a>
+    <a class="btn btn-outline-danger" href="{{ url_for('client_confirm_delete', client_id=client.id) }}">Supprimer</a>
   </div>
 </div>
 
-{% with messages = get_flashed_messages(with_categories=true) %}
-  {% if messages %}
-    {% for category, message in messages %}
-      <div class="alert alert-{{ 'warning' if category=='warning' else ('danger' if category=='danger' else ('success' if category=='success' else 'secondary')) }} alert-dismissible fade show" role="alert">
-        {{ message }}
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fermer"></button>
+<div class="row g-3">
+  <!-- Synthèse volumes / facturation bière -->
+  <div class="col-md-4">
+    <div class="card h-100">
+      <div class="card-header">Synthèse bière</div>
+      <div class="card-body">
+        <div class="d-flex justify-content-between"><span>Litres livrés (cumul)</span><strong>{{ liters_out_cum|default(0)|round(2) }} L</strong></div>
+        <div class="d-flex justify-content-between"><span>Montant bière facturé</span><strong>{{ beer_billed_cum|eur }}</strong></div>
       </div>
-    {% endfor %}
-  {% endif %}
-{% endwith %}
+    </div>
+  </div>
 
-{# --- Cartes de synthèse (affichées si dispo) --- #}
-<div class="row g-3 mb-3">
+  <!-- Consignes séparées -->
   <div class="col-md-4">
     <div class="card h-100">
+      <div class="card-header">Consignes</div>
       <div class="card-body">
-        <div class="text-muted small">Consignes estimées en jeu</div>
-        <div class="fs-4 fw-semibold">{{ deposit_in_play | eur }}</div>
+        <div class="mb-2 small text-muted">Montants et quantités encore “en jeu”.</div>
+
+        <div class="d-flex justify-content-between">
+          <div>Ecocup(s)</div>
+          <div class="text-end">
+            <div><strong>{{ deposit_cup_eur|eur }}</strong></div>
+            <div class="text-muted">{{ cup_qty_in_play|default(0) }} gobelet(s)</div>
+          </div>
+        </div>
+        <hr>
+        <div class="d-flex justify-content-between">
+          <div>Fût(s)</div>
+          <div class="text-end">
+            <div><strong>{{ deposit_keg_eur|eur }}</strong></div>
+            <div class="text-muted">{{ keg_qty_in_play|default(0) }} fût(s)</div>
+          </div>
+        </div>
+
+        <hr>
+        <div class="d-flex justify-content-between">
+          <div>Total consignes</div>
+          {% set deposit_total = (deposit_cup_eur|float) + (deposit_keg_eur|float) %}
+          <strong>{{ deposit_total|eur }}</strong>
+        </div>
+
+        {% if deposit_in_play is not none %}
+          <div class="mt-2 text-muted small">
+            (Compatibilité : ancien total = {{ deposit_in_play|eur }})
+          </div>
+        {% endif %}
       </div>
     </div>
   </div>
+
+  <!-- Matériel & divers -->
   <div class="col-md-4">
     <div class="card h-100">
+      <div class="card-header">Matériel</div>
       <div class="card-body">
-        <div class="text-muted small">Bière facturée (cumul)</div>
-        <div class="fs-4 fw-semibold">{{ beer_billed_cum | eur }}</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-md-4">
-    <div class="card h-100">
-      <div class="card-body">
-        <div class="text-muted small">Litres livrés (cumul)</div>
-        <div class="fs-4 fw-semibold">{{ liters_out_cum or litres_out_cum }}</div>
+        {% set eq = equipment_totals or {} %}
+        {% if eq %}
+          <ul class="mb-0">
+            {% for k, v in eq.items() %}
+              <li>{{ k }} : <strong>{{ v }}</strong></li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <div class="text-muted">Aucun matériel en jeu.</div>
+        {% endif %}
       </div>
     </div>
   </div>
 </div>
 
-{# --- Historique des mouvements --- #}
-<div class="card">
-  <div class="card-header">Historique des mouvements</div>
-  <div class="card-body p-0">
-    <table class="table table-sm table-hover align-middle mb-0">
-      <thead class="table-light">
+<!-- Historique mouvements -->
+<div class="card mt-4">
+  <div class="card-header">Historique</div>
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
         <tr>
-          <th style="width:12%">Date</th>
-          <th style="width:12%">Type</th>
-          <th style="width:36%">Produit</th>
-          <th style="width:10%" class="text-end">Qté</th>
-          <th style="width:15%" class="text-end">Prix TTC</th>
-          <th style="width:15%" class="text-end">Consigne</th>
-          <th style="width:10%" class="text-end">Actions</th>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Produit</th>
+          <th class="text-end">Qté</th>
+          <th class="text-end">PU TTC</th>
+          <th class="text-end">Consigne</th>
+          <th>Notes</th>
+          <th class="text-end">Actions</th>
         </tr>
       </thead>
       <tbody>
         {% for m, v, p in movements %}
-        <tr>
-          <td>{{ m.created_at | dt }}</td>
-          <td>
-            {% if m.type == 'OUT' %}<span class="badge text-bg-primary">Livraison</span>
-            {% elif m.type == 'IN' %}<span class="badge text-bg-success">Retour</span>
-            {% elif m.type == 'FULL' %}<span class="badge text-bg-info">Appro</span>
-            {% elif m.type == 'DEFECT' %}<span class="badge text-bg-warning text-dark">Casse</span>
-            {% else %}{{ m.type }}{% endif %}
-          </td>
-          <td>
-            {{ p.name }}
-            {% if v.size_l %}
-              <span class="text-muted">— {{ v.size_l }} L</span>
-            {% endif %}
-            {% if m.notes %}
-              <div class="small text-muted">{{ m.notes }}</div>
-            {% endif %}
-          </td>
-          <td class="text-end">{{ m.qty }}</td>
-          <td class="text-end">{{ m.unit_price_ttc | eur }}</td>
-          <td class="text-end">{{ m.deposit_per_keg | eur }}</td>
-          <td class="text-end">
-            <a href="{{ url_for('movement_confirm_delete', movement_id=m.id) }}"
-               class="btn btn-sm btn-outline-danger">Suppr.</a>
-          </td>
-        </tr>
+          <tr>
+            <td>{{ m.created_at|dt }}</td>
+            <td>
+              {% if m.type == 'OUT' %}Livraison{% elif m.type == 'IN' %}Reprise{% elif m.type == 'FULL' %}Appro{% elif m.type == 'DEFECT' %}Casse{% else %}{{ m.type }}{% endif %}
+            </td>
+            <td>{{ p.name }}{% if v.size_l %} — {{ v.size_l }} L{% endif %}</td>
+            <td class="text-end">{{ m.qty or 0 }}</td>
+            <td class="text-end">{{ m.unit_price_ttc|eur }}</td>
+            <td class="text-end">
+              {% if m.deposit_per_keg is not none %}
+                {{ m.deposit_per_keg|eur }}
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+            <td>{{ m.notes or '' }}</td>
+            <td class="text-end">
+              <a class="btn btn-sm btn-outline-danger" href="{{ url_for('movement_confirm_delete', movement_id=m.id) }}">Supprimer</a>
+            </td>
+          </tr>
         {% else %}
-        <tr>
-          <td colspan="7" class="text-muted p-4">Aucun mouvement saisi pour l’instant.</td>
-        </tr>
+          <tr><td colspan="8" class="text-center text-muted">Aucun mouvement.</td></tr>
         {% endfor %}
       </tbody>
     </table>
