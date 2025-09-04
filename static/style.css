@@ -39,3 +39,10 @@ body {
 }
 
 .chip-gray { background: #edf1f6; }
+
+/* Consignes split badges */
+.consigne-badges { display:flex; gap:.5rem; flex-wrap:wrap; margin:.25rem 0 .5rem; }
+.badge { display:inline-block; padding:.2rem .55rem; border-radius:999px; font-size:.85rem; line-height:1; border:1px solid #e3e3e3; background:#fafafa; }
+.badge-keg { border-color:#c38b00; background:#fff8e6; }
+.badge-cup { border-color:#007a6e; background:#e6fff9; }
+.badge-eq { border-color:#888; background:#f6f6f6; }
