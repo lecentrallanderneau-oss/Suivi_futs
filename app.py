@@ -66,7 +66,7 @@ def create_app():
     with app.app_context():
         db.create_all()
         seed_if_empty()
-        _ensure_ecocup_simple()
+        _ensure_ecopup_simple()
 
     # ----------------- Healthcheck -----------------
     @app.route("/healthz", methods=["GET", "HEAD"])
@@ -183,16 +183,25 @@ def create_app():
             .all()
         )
 
+        # --- Nouvelle séparation des consignes Ecocup vs Fûts ---
+        dep_cup_eur, cup_qty, dep_keg_eur, keg_qty = U.compute_deposits_split(client_id)
+
         return render_template(
             "client_detail.html",
             client=c,
             view=view,
             movements=movements,
             beer_billed_cum=view["beer_eur"],
-            deposit_in_play=view.get("deposit_eur", 0.0),
+            deposit_in_play=view.get("deposit_eur", 0.0),  # compat ancien
             equipment_totals=view.get("equipment", {}),
             liters_out_cum=view.get("liters_out_cum", 0.0),
             litres_out_cum=view.get("liters_out_cum", 0.0),
+
+            # --- Variables nouvelles pour le template ---
+            deposit_cup_eur=dep_cup_eur,
+            deposit_keg_eur=dep_keg_eur,
+            cup_qty_in_play=cup_qty,
+            keg_qty_in_play=keg_qty,
         )
 
     # ---------- Confirmation + suppression client (BLOQUÉE si pas à 0 partout) ----------
