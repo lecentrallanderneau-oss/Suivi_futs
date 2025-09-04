@@ -244,13 +244,19 @@ def summarize_client_detail(c: Client) -> Dict:
 def summarize_client_for_index(c: Client) -> Dict:
     """
     Résumé compact pour la page d’accueil.
+    IMPORTANT: on expose aussi 'id' et 'name' pour que le template
+    puisse faire {{ c.id }} / {{ c.name }} même si 'c' est un dict.
     """
     dep_cup, qty_cup, dep_keg, qty_keg = compute_deposits_split(c.id)
     liters_out_cum, beer_eur = _beer_totals_for_client(c.id)
 
     open_total = int((qty_cup or 0) + (qty_keg or 0))  # (hors matériel)
     return {
-        "client": c,
+        # >>> ajout pour corriger l'accueil <<<
+        "id": c.id,
+        "name": c.name,
+
+        # données affichables
         "open_total": open_total,
         "cup_qty_in_play": int(qty_cup or 0),
         "keg_qty_in_play": int(qty_keg or 0),
