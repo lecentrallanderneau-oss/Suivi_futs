@@ -66,7 +66,7 @@ def create_app():
     with app.app_context():
         db.create_all()
         seed_if_empty()
-        _ensure_ecopup_simple()
+        _ensure_ecocup_simple()  # <— nom corrigé et cohérent
 
     # ----------------- Healthcheck -----------------
     @app.route("/healthz", methods=["GET", "HEAD"])
@@ -183,7 +183,7 @@ def create_app():
             .all()
         )
 
-        # --- Nouvelle séparation des consignes Ecocup vs Fûts ---
+        # --- Consignes Ecocup vs Fûts ---
         dep_cup_eur, cup_qty, dep_keg_eur, keg_qty = U.compute_deposits_split(client_id)
 
         return render_template(
@@ -197,7 +197,7 @@ def create_app():
             liters_out_cum=view.get("liters_out_cum", 0.0),
             litres_out_cum=view.get("liters_out_cum", 0.0),
 
-            # --- Variables nouvelles pour le template ---
+            # Nouvelles variables
             deposit_cup_eur=dep_cup_eur,
             deposit_keg_eur=dep_keg_eur,
             cup_qty_in_play=cup_qty,
@@ -210,7 +210,6 @@ def create_app():
         c = Client.query.get_or_404(client_id)
         mv_count = Movement.query.filter_by(client_id=client_id).count()
 
-        # Balances variants (tout confondu : bière, écocup, etc.)
         balance_map = _open_qty_by_variant(client_id)
         open_details = []
         open_total = 0
@@ -227,7 +226,6 @@ def create_app():
                     qty=q
                 ))
 
-        # Dépôts/consignes + matériel depuis la vue de synthèse
         view = U.summarize_client_detail(c)
         deposit_in_play = float(view.get("deposit_eur", 0.0) or 0.0)
         equipment_dict = view.get("equipment", {}) or {}
@@ -236,11 +234,9 @@ def create_app():
         except Exception:
             equipment_in_play = 0
 
-        # Zéro partout ? (tolérance arrondis de 0.01 €)
         eps_eur = 0.01
         blocked = (open_total > 0) or (abs(deposit_in_play) > eps_eur) or (equipment_in_play > 0)
 
-        # Tente le template fichier ; sinon fallback inline
         try:
             return render_template(
                 "client_confirm_delete.html",
@@ -325,7 +321,6 @@ def create_app():
     def client_delete(client_id):
         c = Client.query.get_or_404(client_id)
 
-        # Recalcule les garde-fous côté backend (source de vérité)
         balance_map = _open_qty_by_variant(client_id)
         open_total = sum(q for q in balance_map.values() if q > 0)
 
@@ -350,12 +345,10 @@ def create_app():
             flash("Suppression impossible : " + ", ".join(msg_parts) + ".", "danger")
             return redirect(url_for("client_confirm_delete", client_id=client_id))
 
-        # Si le wizard pointait sur ce client, on nettoie la session
         if session.get("wiz", {}).get("client_id") == client_id:
             session["wiz"].pop("client_id", None)
             session.modified = True
 
-        # Restaure inventaire pour OUT/FULL, et supprime les mouvements
         movements = Movement.query.filter_by(client_id=client_id).all()
         for m in movements:
             if m.variant_id and m.qty:
@@ -477,7 +470,6 @@ def create_app():
             session["wiz"] = {}
         wiz = session["wiz"]
 
-        # Client pré-sélectionné (depuis une fiche client)
         pre_client_id = request.args.get("client_id", type=int)
         if pre_client_id:
             wiz["client_id"] = pre_client_id
@@ -539,7 +531,6 @@ def create_app():
             )
             base_q = _hide_ecocup_maintenance(base_q)
 
-            # Si retour (IN), limiter aux variantes réellement en jeu + “Matériel seul”
             if wiz.get("type") == "IN" and wiz.get("client_id"):
                 open_map = _open_qty_by_variant(wiz["client_id"])
                 allowed_ids = {vid for vid, openq in open_map.items() if openq > 0}
@@ -588,7 +579,6 @@ def create_app():
                 deposits = request.form.getlist("deposit_per_keg")
                 notes = request.form.get("notes") or None
 
-                # Matériel prêté/repris → notes
                 t = request.form.get("eq_tireuse", type=int)
                 c2 = request.form.get("eq_co2", type=int)
                 cpt = request.form.get("eq_comptoir", type=int)
