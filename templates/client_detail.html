@@ -1,131 +1,58 @@
 {% extends "base.html" %}
-{% block title %}Fiche client{% endblock %}
+{% import "_macros.html" as ui %}
 
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h3 class="mb-0">{{ client.name }}</h3>
-  <div class="d-flex gap-2">
-    <a class="btn btn-outline-primary" href="{{ url_for('movement_new', client_id=client.id) }}">Nouveau mouvement</a>
-    <a class="btn btn-outline-secondary" href="{{ url_for('client_edit', client_id=client.id) }}">Modifier</a>
-    <a class="btn btn-outline-danger" href="{{ url_for('client_confirm_delete', client_id=client.id) }}">Supprimer</a>
+<div class="header-line">
+  <h1>{{ c.name }}</h1>
+  <div class="btn-group">
+    <a class="btn btn-primary" href="{{ url_for('movement_new', client_id=c.id) }}">+ Nouveau mouvement</a>
+    <a class="btn btn-outline-secondary" href="{{ url_for('client_edit', client_id=c.id) }}">Modifier</a>
+    <a class="btn btn-outline-danger" href="{{ url_for('client_confirm_delete', client_id=c.id) }}">Supprimer</a>
   </div>
 </div>
 
-<div class="row g-3">
-  <!-- Synthèse volumes / facturation bière -->
-  <div class="col-md-4">
-    <div class="card h-100">
-      <div class="card-header">Synthèse bière</div>
-      <div class="card-body">
-        <div class="d-flex justify-content-between"><span>Litres livrés (cumul)</span><strong>{{ liters_out_cum|default(0)|round(2) }} L</strong></div>
-        <div class="d-flex justify-content-between"><span>Montant bière facturé</span><strong>{{ beer_billed_cum|eur }}</strong></div>
+<div class="grid-2">
+  <div class="card">
+    <div class="card-header">Récapitulatif</div>
+    <div class="card-body">
+      <div class="pills">
+        <span class="pill pill-muted">Fûts en jeu: {{ view.kegs_qty }}</span>
+        <span class="pill">Consignes fûts: {{ ui.eur(view.deposits.keg_eur) }} ({{ view.deposits.keg_qty }} uds)</span>
+        <span class="pill pill-cup">Consigne gobelets: {{ ui.eur(view.deposits.cup_eur) }} ({{ view.deposits.cup_qty }} uds)</span>
       </div>
+      <div class="mt-2">
+        <div><strong>Matériel prêté</strong></div>
+        {{ ui.equipment_badges(view.equipment) }}
+      </div>
+      {% if c.notes %}
+      <hr/>
+      <div class="muted">Notes : {{ c.notes }}</div>
+      {% endif %}
     </div>
   </div>
 
-  <!-- Consignes séparées -->
-  <div class="col-md-4">
-    <div class="card h-100">
-      <div class="card-header">Consignes</div>
-      <div class="card-body">
-        <div class="mb-2 small text-muted">Montants et quantités encore “en jeu”.</div>
-
-        <div class="d-flex justify-content-between">
-          <div>Ecocup(s)</div>
-          <div class="text-end">
-            <div><strong>{{ deposit_cup_eur|eur }}</strong></div>
-            <div class="text-muted">{{ cup_qty_in_play|default(0) }} gobelet(s)</div>
-          </div>
-        </div>
-        <hr>
-        <div class="d-flex justify-content-between">
-          <div>Fût(s)</div>
-          <div class="text-end">
-            <div><strong>{{ deposit_keg_eur|eur }}</strong></div>
-            <div class="text-muted">{{ keg_qty_in_play|default(0) }} fût(s)</div>
-          </div>
-        </div>
-
-        <hr>
-        <div class="d-flex justify-content-between">
-          <div>Total consignes</div>
-          {% set deposit_total = (deposit_cup_eur|float) + (deposit_keg_eur|float) %}
-          <strong>{{ deposit_total|eur }}</strong>
-        </div>
-
-        {% if deposit_in_play is not none %}
-          <div class="mt-2 text-muted small">
-            (Compatibilité : ancien total = {{ deposit_in_play|eur }})
-          </div>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
-  <!-- Matériel & divers -->
-  <div class="col-md-4">
-    <div class="card h-100">
-      <div class="card-header">Matériel</div>
-      <div class="card-body">
-        {% set eq = equipment_totals or {} %}
-        {% if eq %}
-          <ul class="mb-0">
-            {% for k, v in eq.items() %}
-              <li>{{ k }} : <strong>{{ v }}</strong></li>
-            {% endfor %}
-          </ul>
-        {% else %}
-          <div class="text-muted">Aucun matériel en jeu.</div>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Historique mouvements -->
-<div class="card mt-4">
-  <div class="card-header">Historique</div>
-  <div class="table-responsive">
-    <table class="table table-sm align-middle mb-0">
-      <thead>
-        <tr>
-          <th>Date</th>
-          <th>Type</th>
-          <th>Produit</th>
-          <th class="text-end">Qté</th>
-          <th class="text-end">PU TTC</th>
-          <th class="text-end">Consigne</th>
-          <th>Notes</th>
-          <th class="text-end">Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for m, v, p in movements %}
+  <div class="card">
+    <div class="card-header">Fûts en jeu (détail)</div>
+    <div class="card-body">
+      {% if view.open_by_variant %}
+      <table class="table">
+        <thead>
+          <tr><th>Produit</th><th>Contenance</th><th class="ta-right">En jeu</th></tr>
+        </thead>
+        <tbody>
+          {% for r in view.open_by_variant %}
           <tr>
-            <td>{{ m.created_at|dt }}</td>
-            <td>
-              {% if m.type == 'OUT' %}Livraison{% elif m.type == 'IN' %}Reprise{% elif m.type == 'FULL' %}Appro{% elif m.type == 'DEFECT' %}Casse{% else %}{{ m.type }}{% endif %}
-            </td>
-            <td>{{ p.name }}{% if v.size_l %} — {{ v.size_l }} L{% endif %}</td>
-            <td class="text-end">{{ m.qty or 0 }}</td>
-            <td class="text-end">{{ m.unit_price_ttc|eur }}</td>
-            <td class="text-end">
-              {% if m.deposit_per_keg is not none %}
-                {{ m.deposit_per_keg|eur }}
-              {% else %}
-                <span class="text-muted">—</span>
-              {% endif %}
-            </td>
-            <td>{{ m.notes or '' }}</td>
-            <td class="text-end">
-              <a class="btn btn-sm btn-outline-danger" href="{{ url_for('movement_confirm_delete', movement_id=m.id) }}">Supprimer</a>
-            </td>
+            <td>{{ r.product_name }}</td>
+            <td>{{ r.size_l }} L</td>
+            <td class="ta-right"><strong>{{ r.qty_open }}</strong></td>
           </tr>
-        {% else %}
-          <tr><td colspan="8" class="text-center text-muted">Aucun mouvement.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="muted">Aucun fût en jeu.</div>
+      {% endif %}
+    </div>
   </div>
 </div>
 {% endblock %}
