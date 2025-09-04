@@ -13,20 +13,22 @@
   <div class="card-body">
     <div class="list-rows">
       {% for c in cards %}
+      {% set cid = c.get('id', c.get('client_id')) %}
+      {% set cname = c.get('name') %}
       <div class="list-row">
         <div class="col-name">
-          <a class="client-link" href="{{ url_for('client_detail', client_id=c.id) }}">{{ c.name }}</a>
+          <a class="client-link" href="{{ url_for('client_detail', client_id=cid) }}">{{ cname }}</a>
         </div>
 
         <div class="col-pills">
-          <span class="pill pill-muted">fût(s)</span>
-          <span class="pill">Bière facturée: {{ ui.eur(c.billed_beer_eur) }}</span>
-          <span class="pill pill-cup">Consigne gobelets: {{ ui.eur(c.deposits_cup_eur) }}</span>
-          <span class="pill">Consignes fûts: {{ ui.eur(c.deposits_keg_eur) }}</span>
+          <span class="pill pill-muted">Fûts en jeu: {{ c.get('kegs_qty', 0) }}</span>
+          <span class="pill">Bière facturée: {{ ui.eur(c.get('billed_beer_eur', 0)) }}</span>
+          <span class="pill pill-cup">Consigne gobelets: {{ ui.eur(c.get('deposits_cup_eur', 0)) }}</span>
+          <span class="pill">Consignes fûts: {{ ui.eur(c.get('deposits_keg_eur', 0)) }}</span>
         </div>
 
         <div class="col-eq">
-          {{ ui.equipment_badges(c.equipment) }}
+          {{ ui.equipment_badges(c.get('equipment', {})) }}
         </div>
       </div>
       {% endfor %}
