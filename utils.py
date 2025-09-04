@@ -1,219 +1,90 @@
-# utils.py
-from __future__ import annotations
-from datetime import datetime
-from typing import Dict, List, Tuple
-
+# --- utils.py : ajout ---
 from sqlalchemy import func
+from models import db, Movement, Variant, Product
 
-from models import db, Client, Product, Variant, Movement, ReorderRule, Inventory
-
-
-# -------------------- Outils généraux --------------------
-
-def now_utc() -> datetime:
-    """Retourne un datetime naïf en UTC (cohérent avec le reste de l'app)."""
-    return datetime.utcnow()
-
-
-def _to_int(x, default=0) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return default
-
-
-def _to_float(x, default=0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-
-def _is_ecocup_name(name: str) -> bool:
-    n = (name or "").lower()
-    return ("ecocup" in n) or ("eco cup" in n) or ("gobelet" in n)
-
-
-def _is_equipment_only_name(name: str) -> bool:
-    n = (name or "").lower()
-    return ("matériel" in n or "materiel" in n) and ("seul" in n)
-
-
-def default_deposit_for_product(product) -> float:
+def compute_deposits_split(client_id: int):
     """
-    Consigne par défaut :
-    - Ecocup / gobelets -> 1.00 €
-    - Autres (fûts, etc.) -> 30.00 €
+    Retourne (deposit_cup_eur, cup_qty_in_play, deposit_keg_eur, keg_qty_in_play)
+    en séparant consigne Ecocup vs consigne Fûts.
+    - Ecocup = produits dont le nom contient ecocup/eco cup/gobelet (hors lavage/perdu/perte/wash/clean)
+    - Fûts   = tout le reste "liquide" (on exclut 'Matériel seul', etc.)
+    Le signe est géré comme d'habitude : OUT +, IN/DEFECT/FULL -.
+    On utilise la consigne de la ligne (deposit_per_keg) si présente, sinon:
+      - 1.0 € pour Ecocup
+      - 30.0 € pour Fûts
     """
-    name = (getattr(product, "name", "") or "").lower()
-    if "ecocup" in name or "eco cup" in name or "gobelet" in name:
-        return 1.0
-    return 30.0
-
-
-def get_or_create_inventory(variant_id: int) -> Inventory:
-    """Récupère (ou crée) une ligne d'inventaire pour la variante donnée."""
-    inv = Inventory.query.filter_by(variant_id=variant_id).first()
-    if not inv:
-        inv = Inventory(variant_id=variant_id, qty=0)
-        db.session.add(inv)
-    return inv
-
-
-# -------------------- Agrégations client --------------------
-
-def _movements_joined_for_client(client_id: int):
     rows = (
-        db.session.query(Movement, Variant, Product)
+        db.session.query(
+            Movement.qty,
+            Movement.type,
+            Movement.deposit_per_keg,
+            Variant.size_l,
+            Product.name,
+        )
         .join(Variant, Movement.variant_id == Variant.id)
         .join(Product, Variant.product_id == Product.id)
         .filter(Movement.client_id == client_id)
-        .order_by(Movement.created_at.desc(), Movement.id.desc())
-        .all()
-    )
-    return rows
-
-
-def _parse_equipment_notes(notes: str) -> Dict[str, int]:
-    out: Dict[str, int] = {"tireuse": 0, "co2": 0, "comptoir": 0, "tonnelle": 0}
-    if not notes:
-        return out
-    parts = [p.strip() for p in notes.split(";") if p.strip()]
-    for part in parts:
-        if "=" in part:
-            k, v = part.split("=", 1)
-            k = k.strip().lower()
-            if k in out:
-                try:
-                    out[k] += int(v)
-                except Exception:
-                    pass
-    return out
-
-
-def summarize_client_detail(client: Client) -> Dict:
-    rows = _movements_joined_for_client(client.id)
-
-    kegs_open = 0
-    deposit_eur = 0.0
-    beer_eur = 0.0
-    liters_out_cum = 0.0
-    equipment = {"tireuse": 0, "co2": 0, "comptoir": 0, "tonnelle": 0}
-
-    for m, v, p in rows:
-        qty = _to_int(m.qty, 0)
-        pname = (p.name if p else "") or ""
-        is_cup = _is_ecocup_name(pname)
-        is_equipment_only = _is_equipment_only_name(pname)
-        unit_price = m.unit_price_ttc if (m.unit_price_ttc is not None) else (v.price_ttc if v and v.price_ttc is not None else None)
-        deposit = m.deposit_per_keg if (m.deposit_per_keg is not None) else default_deposit_for_product(p)
-
-        # Consigne en jeu
-        if m.type == "OUT":
-            deposit_eur += _to_float(deposit) * qty
-        elif m.type in ("IN", "DEFECT", "FULL"):
-            deposit_eur -= _to_float(deposit) * qty
-
-        # Bière + litres (ignore ecocup et "matériel seul")
-        if not is_cup and not is_equipment_only:
-            if m.type == "OUT":
-                if v and v.size_l:
-                    liters_out_cum += _to_float(v.size_l) * qty
-                if unit_price is not None:
-                    beer_eur += _to_float(unit_price) * qty
-
-            if m.type == "OUT":
-                kegs_open += qty
-            elif m.type in ("IN", "DEFECT", "FULL"):
-                kegs_open -= qty
-
-        # Équipement via notes
-        if m.notes:
-            parsed = _parse_equipment_notes(m.notes)
-            sign = 1 if m.type == "OUT" else (-1 if m.type in ("IN", "DEFECT", "FULL") else 0)
-            if sign:
-                for k in equipment:
-                    equipment[k] += sign * _to_int(parsed.get(k, 0), 0)
-
-    return {
-        "kegs": max(kegs_open, 0),
-        "deposit_eur": round(deposit_eur, 2),
-        "beer_eur": round(beer_eur, 2),
-        "liters_out_cum": round(liters_out_cum, 2),
-        "equipment": equipment,
-    }
-
-
-def summarize_client_for_index(client: Client) -> Dict:
-    detail = summarize_client_detail(client)
-    return {
-        "id": client.id,
-        "name": client.name,
-        "kegs": detail["kegs"],
-        "deposit_eur": detail["deposit_eur"],
-        "beer_eur": detail["beer_eur"],
-        "liters_out_cum": detail["liters_out_cum"],
-        "equipment": detail["equipment"],
-    }
-
-
-def summarize_totals(cards: List[Dict]) -> Dict:
-    total_clients = len(cards)
-    total_kegs = sum(_to_int(c.get("kegs", 0), 0) for c in cards)
-    total_deposit = sum(_to_float(c.get("deposit_eur", 0.0), 0.0) for c in cards)
-    total_beer = sum(_to_float(c.get("beer_eur", 0.0), 0.0) for c in cards)
-    total_liters = sum(_to_float(c.get("liters_out_cum", 0.0), 0.0) for c in cards)
-    return {
-        "clients": total_clients,
-        "kegs": total_kegs,
-        "deposit_eur": round(total_deposit, 2),
-        "beer_eur": round(total_beer, 2),
-        "liters_out_cum": round(total_liters, 2),
-    }
-
-
-# -------------------- Stock & réassort --------------------
-
-def get_stock_items() -> List[Tuple[Variant, Product, int, int]]:
-    rows = (
-        db.session.query(Variant, Product)
-        .join(Product, Variant.product_id == Product.id)
-        .order_by(Product.name.asc(), Variant.size_l.asc())
         .all()
     )
 
-    out: List[Tuple[Variant, Product, int, int]] = []
-    for v, p in rows:
-        inv = Inventory.query.filter_by(variant_id=v.id).first()
-        rr = ReorderRule.query.filter_by(variant_id=v.id).first()
-        inv_qty = _to_int(inv.qty if inv and inv.qty is not None else 0, 0)
-        min_qty = _to_int(rr.min_qty if rr and rr.min_qty is not None else 0, 0)
-        out.append((v, p, inv_qty, min_qty))
-    return out
+    def _is_cup(name: str) -> bool:
+        if not name:
+            return False
+        n = name.lower()
+        is_cup = ("ecocup" in n) or ("eco cup" in n) or ("gobelet" in n)
+        is_maintenance = any(w in n for w in ["lavage", "wash", "perdu", "perte", "clean"])
+        return is_cup and not is_maintenance
 
+    def _is_equipment_only(name: str) -> bool:
+        if not name:
+            return False
+        n = name.lower()
+        return (("matériel" in n or "materiel" in n) and "seul" in n)
 
-def compute_reorder_alerts() -> List[Dict]:
-    """
-    Retourne des alertes compatibles avec _macros.html :
-    { 'variant': Variant, 'product': Product, 'inv_qty': int, 'min_qty': int, 'missing': int }
-    """
-    alerts: List[Dict] = []
-    rules = ReorderRule.query.all()
-    for rr in rules:
-        v = Variant.query.get(rr.variant_id)
-        if not v:
+    cup_eur = 0.0
+    cup_qty = 0
+    keg_eur = 0.0
+    keg_qty = 0
+
+    for qty, mtype, dep, size_l, pname in rows:
+        if not qty:
             continue
-        p = Product.query.get(v.product_id)
-        inv = Inventory.query.filter_by(variant_id=v.id).first()
-        inv_qty = _to_int(inv.qty if inv and inv.qty is not None else 0, 0)
-        min_qty = _to_int(rr.min_qty if rr and rr.min_qty is not None else 0, 0)
-        if min_qty > inv_qty:
-            alerts.append({
-                "variant": v,
-                "product": p,
-                "inv_qty": inv_qty,
-                "min_qty": min_qty,
-                "missing": (min_qty - inv_qty),
-            })
-    alerts.sort(key=lambda a: (-a["missing"], a["product"].name if a.get("product") else ""))
-    return alerts
+
+        # signe : OUT = +, IN/DEFECT/FULL = -
+        if mtype == "OUT":
+            s = 1
+        elif mtype in ("IN", "DEFECT", "FULL"):
+            s = -1
+        else:
+            s = 0
+        if s == 0:
+            continue
+
+        name_lc = (pname or "").lower()
+
+        if _is_equipment_only(name_lc):
+            # le matériel seul n’entre pas dans la consigne
+            continue
+
+        is_cup = _is_cup(name_lc)
+
+        # valeur de consigne fallback si non saisie sur la ligne
+        if dep is None:
+            dep_val = 1.0 if is_cup else 30.0
+        else:
+            try:
+                dep_val = float(dep)
+            except Exception:
+                dep_val = 1.0 if is_cup else 30.0
+
+        # cumul
+        if is_cup:
+            cup_qty += s * int(qty)
+            cup_eur += s * float(dep_val) * int(qty)
+        else:
+            # assimilé "fûts" (bière et assimilés)
+            keg_qty += s * int(qty)
+            keg_eur += s * float(dep_val) * int(qty)
+
+    # On retourne les montants (peuvent être négatifs si "sur-retours" historiques)
+    return (cup_eur, cup_qty, keg_eur, keg_qty)
