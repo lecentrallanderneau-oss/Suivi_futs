@@ -527,3 +527,144 @@ if __name__ == "__main__":
     with app.app_context():
         db.create_all()
     app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    @app.route("/client/<int:client_id>")
+def client_detail(client_id):
+    c = Client.query.get_or_404(client_id)
+    view = U.summarize_client_detail(c)
+
+    movements = (
+        db.session.query(Movement, Variant, Product)
+        .join(Variant, Movement.variant_id == Variant.id)
+        .join(Product, Variant.product_id == Product.id)
+        .filter(Movement.client_id == client_id)
+        .order_by(Movement.created_at.desc(), Movement.id.desc())
+        .all()
+    )
+
+    # Consignes Ecocup vs Fûts
+    dep_cup_eur, cup_qty, dep_keg_eur, keg_qty = U.compute_deposits_split(client_id)
+
+    return render_template(
+        "client_detail.html",
+        client=c,
+        c=c,  # <-- important pour les templates qui utilisent {{ c.* }}
+        view=view,
+        movements=movements,
+        beer_billed_cum=view["beer_eur"],
+        deposit_in_play=view.get("deposit_eur", 0.0),
+        equipment_totals=view.get("equipment", {}),
+        liters_out_cum=view.get("liters_out_cum", 0.0),
+        litres_out_cum=view.get("liters_out_cum", 0.0),
+        deposit_cup_eur=dep_cup_eur,
+        deposit_keg_eur=dep_keg_eur,
+        cup_qty_in_play=cup_qty,
+        keg_qty_in_play=keg_qty,
+    )
+@app.route("/client/<int:client_id>/confirm-delete", methods=["GET"])
+def client_confirm_delete(client_id):
+    c = Client.query.get_or_404(client_id)
+    mv_count = Movement.query.filter_by(client_id=client_id).count()
+
+    # Balance encore “en jeu”
+    balance_map = _open_qty_by_variant(client_id)
+    open_details, open_total = [], 0
+    for vid, q in balance_map.items():
+        if q > 0:
+            v = Variant.query.get(vid)
+            if not v:
+                continue
+            p = v.product
+            open_total += q
+            open_details.append(SimpleNamespace(
+                product_name=p.name if p else "Produit",
+                size_l=v.size_l,
+                qty=q
+            ))
+
+    view = U.summarize_client_detail(c)
+    deposit_in_play = float(view.get("deposit_eur", 0.0) or 0.0)
+    equipment_dict = view.get("equipment", {}) or {}
+    try:
+        equipment_in_play = sum(int(v or 0) for v in equipment_dict.values())
+    except Exception:
+        equipment_in_play = 0
+
+    eps_eur = 0.01
+    blocked = (open_total > 0) or (abs(deposit_in_play) > eps_eur) or (equipment_in_play > 0)
+
+    try:
+        return render_template(
+            "client_confirm_delete.html",
+            client=c,
+            c=c,  # <-- important
+            mv_count=mv_count,
+            open_total=open_total,
+            open_details=open_details,
+            deposit_in_play=deposit_in_play,
+            equipment_in_play=equipment_in_play,
+            blocked=blocked,
+        )
+    except TemplateNotFound:
+        html = """
+        {% extends "base.html" %}
+        {% block title %}Supprimer le client{% endblock %}
+        {% block content %}
+        <div class="card border-danger">
+          <div class="card-header bg-danger text-white">⚠️ Suppression définitive du client</div>
+          <div class="card-body">
+            <h5 class="card-title mb-3">{{ client.name }}</h5>
+            <p class="mb-2">Cette action est <strong>irréversible</strong>.</p>
+
+            {% if open_total and open_total > 0 %}
+              <div class="alert alert-warning">
+                Il reste <strong>{{ open_total }}</strong> article(s) en jeu :
+                <ul class="mb-0">
+                  {% for it in open_details %}
+                    <li>{{ it.product_name }}{% if it.size_l %} — {{ it.size_l }} L{% endif %} : {{ it.qty }}</li>
+                  {% endfor %}
+                </ul>
+              </div>
+            {% endif %}
+
+            {% if deposit_in_play and (deposit_in_play | float | abs) > 0.01 %}
+              <div class="alert alert-info">
+                Consignes en jeu : <strong>{{ deposit_in_play | eur }}</strong>.
+              </div>
+            {% endif %}
+
+            {% if equipment_in_play and equipment_in_play > 0 %}
+              <div class="alert alert-secondary">
+                Matériel en jeu : <strong>{{ equipment_in_play }}</strong>.
+              </div>
+            {% endif %}
+
+            {% if blocked %}
+              <div class="alert alert-danger">
+                Suppression <strong>bloquée</strong> : le client n’est pas à zéro partout.
+              </div>
+              <a class="btn btn-outline-secondary" href="{{ url_for('client_detail', client_id=client.id) }}">Retour à la fiche</a>
+            {% else %}
+              <form method="post" action="{{ url_for('client_delete', client_id=client.id) }}" class="d-flex gap-2 mt-3">
+                <a class="btn btn-outline-secondary" href="{{ url_for('client_detail', client_id=client.id) }}">Annuler</a>
+                <button class="btn btn-danger" type="submit"
+                        onclick="return confirm('Confirmer la suppression définitive ? Action irréversible.');">
+                  Supprimer définitivement
+                </button>
+              </form>
+            {% endif %}
+          </div>
+        </div>
+        {% endblock %}
+        """
+        return render_template_string(
+            html,
+            client=c,
+            c=c,  # <-- important
+            mv_count=mv_count,
+            open_total=open_total,
+            open_details=open_details,
+            deposit_in_play=deposit_in_play,
+            equipment_in_play=equipment_in_play,
+            blocked=blocked,
+        )
+
