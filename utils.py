@@ -64,7 +64,7 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# -------------------- TA logique: compute_deposits_split (inchangée) --------------------
+# -------------------- Consignes : split gobelets / fûts --------------------
 
 def compute_deposits_split(client_id: int):
     """
@@ -179,7 +179,7 @@ def _open_qty_by_variant(client_id: int) -> Dict[int, int]:
     )
     back_rows = dict(
         db.session.query(Movement.variant_id, func.coalesce(func.sum(Movement.qty), 0))
-        .filter(Movement.client_id == client_id, Movement.type.in_(["IN", "DEFECT", "FULL"]))
+        .filter(Movement.client_id == client_id, Movement.type in ["IN", "DEFECT", "FULL"])
         .group_by(Movement.variant_id)
         .all()
     )
@@ -207,8 +207,10 @@ def _beer_totals_for_client(client_id: int) -> Tuple[float, float]:
 
     name_lc = func.lower(Product.name)
     is_cup = (name_lc.like("%ecocup%") | name_lc.like("%eco cup%") | name_lc.like("%gobelet%"))
-    is_maint = (name_lc.like("%lavage%") | name_lc.like("%perdu%") | name_lc.like("%perte%")
-                | name_lc.like("%wash%") | name_lc.like("%clean%"))
+    is_maint = (
+        name_lc.like("%lavage%") | name_lc.like("%perdu%") | name_lc.like("%perte%")
+        | name_lc.like("%wash%") | name_lc.like("%clean%")
+    )
     is_equip = and_((name_lc.like("%matériel%") | name_lc.like("%materiel%")), name_lc.like("%seul%"))
 
     q = q.filter(~and_(is_cup, is_maint)).filter(~is_equip)
@@ -237,26 +239,26 @@ def summarize_client_detail(c: Client) -> Dict:
         "deposit_keg_eur": round(dep_keg or 0.0, 2),
         "cup_qty_in_play": int(qty_cup or 0),
         "keg_qty_in_play": int(qty_keg or 0),
-        "equipment": {},  # extension future
+        # Equipment (placeholder ; 0 pour ne rien afficher si badge)
+        "equipment": {"tireuse": 0, "co2": 0, "comptoir": 0, "tonnelle": 0},
     }
 
 
 def summarize_client_for_index(c: Client) -> Dict:
     """
     Résumé compact pour la page d’accueil.
-    IMPORTANT: on expose aussi 'id' et 'name' pour que le template
+    IMPORTANT : on expose aussi 'id' et 'name' pour que le template
     puisse faire {{ c.id }} / {{ c.name }} même si 'c' est un dict.
+    + Ajout de 'equipment' pour le macro ui.equipment_badges(...)
     """
     dep_cup, qty_cup, dep_keg, qty_keg = compute_deposits_split(c.id)
     liters_out_cum, beer_eur = _beer_totals_for_client(c.id)
 
     open_total = int((qty_cup or 0) + (qty_keg or 0))  # (hors matériel)
     return {
-        # >>> ajout pour corriger l'accueil <<<
         "id": c.id,
         "name": c.name,
 
-        # données affichables
         "open_total": open_total,
         "cup_qty_in_play": int(qty_cup or 0),
         "keg_qty_in_play": int(qty_keg or 0),
@@ -265,6 +267,9 @@ def summarize_client_for_index(c: Client) -> Dict:
         "deposit_keg_eur": round(dep_keg or 0.0, 2),
         "liters_out_cum": round(liters_out_cum or 0.0, 1),
         "beer_eur": round(beer_eur or 0.0, 2),
+
+        # >>> clé attendue par {{ ui.equipment_badges(c.equipment) }} sur l'accueil
+        "equipment": {"tireuse": 0, "co2": 0, "comptoir": 0, "tonnelle": 0},
     }
 
 
@@ -332,7 +337,6 @@ def compute_reorder_alerts() -> List[SimpleNamespace]:
     """
     alerts: List[SimpleNamespace] = []
     for (v, p, inv_qty, min_qty) in get_stock_items():
-        # On ignore les variantes sans règle de réassort (min_qty <= 0)
         if (min_qty or 0) <= 0:
             continue
         if (inv_qty or 0) < (min_qty or 0):
