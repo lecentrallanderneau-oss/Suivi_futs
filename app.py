@@ -581,14 +581,50 @@ def create_app():
                 else:
                     created_at = U.now_utc()
 
-                # Champs postés (tolérance aux listes vides/désalignées)
+                # Récupération des variantes sélectionnées
                 variant_ids = request.form.getlist("variant_id") or request.form.getlist("variant_ids") or []
-                qtys = request.form.getlist("qty") or []
-                unit_prices = request.form.getlist("unit_price_ttc") or []
-                deposits = request.form.getlist("deposit_per_keg") or []
-                notes = request.form.get("notes") or None
+                if not variant_ids:
+                    # fallback: certaines implémentations postent les ids sous forme "vid_<id>=on"
+                    variant_ids = [k.split("_", 1)[1] for k in request.form.keys() if k.startswith("vid_")]
+                try:
+                    variant_ids = [int(v) for v in variant_ids]
+                except Exception:
+                    variant_ids = [int(v) for v in variant_ids if str(v).isdigit()]
 
-                # Encodage matériel prêté dans notes (tireuse, CO2, comptoir, tonnelle)
+                if not variant_ids:
+                    flash("Sélectionne au moins un produit.", "warning")
+                    return redirect(url_for("movement_wizard", step=2))
+
+                # Récupération qty/prix/consigne : supporte à la fois listes et clés ciblées par id
+                list_qtys = request.form.getlist("qty") or request.form.getlist("qty[]") or []
+                list_prices = request.form.getlist("unit_price_ttc") or request.form.getlist("unit_price_ttc[]") or []
+                list_deps = request.form.getlist("deposit_per_keg") or request.form.getlist("deposit_per_keg[]") or []
+
+                # Construire des maps par id si présents sous forme "qty_<id>"
+                qty_map = {}
+                price_map = {}
+                dep_map = {}
+                for vid in variant_ids:
+                    if f"qty_{vid}" in request.form:
+                        try:
+                            qty_map[vid] = int((request.form.get(f"qty_{vid}") or "0").strip() or 0)
+                        except Exception:
+                            qty_map[vid] = 0
+                    if f"unit_price_ttc_{vid}" in request.form:
+                        vraw = request.form.get(f"unit_price_ttc_{vid}")
+                        try:
+                            price_map[vid] = float(str(vraw).replace(",", ".")) if vraw not in ("", None) else None
+                        except Exception:
+                            price_map[vid] = None
+                    if f"deposit_per_keg_{vid}" in request.form:
+                        draw = request.form.get(f"deposit_per_keg_{vid}")
+                        try:
+                            dep_map[vid] = float(str(draw).replace(",", ".")) if draw not in ("", None) else None
+                        except Exception:
+                            dep_map[vid] = None
+
+                # Notes + encodage matériel
+                notes = request.form.get("notes") or None
                 t = request.form.get("eq_tireuse", type=int)
                 c2 = request.form.get("eq_co2", type=int)
                 cpt = request.form.get("eq_comptoir", type=int)
@@ -600,46 +636,40 @@ def create_app():
                 if ton: equip_parts.append(f"tonnelle={ton}")
                 notes = (";".join(equip_parts) + (";" + notes if notes else "")) or None
 
-                # Si aucun produit => retour étape 2
-                if not variant_ids:
-                    flash("Sélectionne au moins un produit.", "warning")
-                    return redirect(url_for("movement_wizard", step=2))
-
                 client_id2 = int(wiz["client_id"])
                 mtype = wiz["type"]
-
                 violations = []
                 open_map = _open_qty_by_variant(client_id2) if mtype == "IN" else {}
 
-                # On itère proprement sur les listes (désalignement toléré)
-                for vid_str, qty_str, up_str, dep_str in itertools.zip_longest(
-                    variant_ids, qtys, unit_prices, deposits, fillvalue=""
-                ):
-                    # id variante
-                    try:
-                        vid_int = int(vid_str)
-                    except Exception:
-                        continue
-
-                    # quantité
-                    try:
-                        qty_int = int(qty_str) if str(qty_str).strip() != "" else 0
-                    except Exception:
-                        qty_int = 0
-
-                    # prix unitaire (optionnel)
-                    up = None
-                    if str(up_str).strip() != "":
+                # On itère avec zip_longest pour also supporter les listes parallèles
+                for idx, vid_int in enumerate(variant_ids):
+                    # qty
+                    if vid_int in qty_map:
+                        qty_int = qty_map[vid_int]
+                    else:
+                        raw = list_qtys[idx] if idx < len(list_qtys) else ""
                         try:
-                            up = float(str(up_str).replace(",", "."))
+                            qty_int = int(str(raw).strip() or 0)
+                        except Exception:
+                            qty_int = 0
+
+                    # unit price
+                    if vid_int in price_map:
+                        up = price_map[vid_int]
+                    else:
+                        praw = list_prices[idx] if idx < len(list_prices) else ""
+                        try:
+                            up = float(str(praw).replace(",", ".")) if str(praw).strip() != "" else None
                         except Exception:
                             up = None
 
-                    # consigne ligne (optionnelle)
-                    dep = None
-                    if str(dep_str).strip() != "":
+                    # deposit
+                    if vid_int in dep_map:
+                        dep = dep_map[vid_int]
+                    else:
+                        draw = list_deps[idx] if idx < len(list_deps) else ""
                         try:
-                            dep = float(str(dep_str).replace(",", "."))
+                            dep = float(str(draw).replace(",", ".")) if str(draw).strip() != "" else None
                         except Exception:
                             dep = None
 
@@ -648,32 +678,27 @@ def create_app():
                     if not v:
                         continue
 
-                    # Matériel seul ?
                     pname = (v.product.name if v and v.product else "") or ""
                     is_equipment_only = ("matériel" in pname.lower() or "materiel" in pname.lower()) and ("seul" in pname.lower())
+
                     if is_equipment_only:
-                        # On n’enregistre pas de ligne chiffrée, le prêt est encodé dans notes.
-                        # Pour conserver la trace du prêt même sans autre ligne, on autorise qty=0.
+                        # ligne "support" pour porter les notes (pas d'impact inventaire/prix/consigne)
                         qty_int = 0
                         up = 0.0
                         dep = 0.0
                     else:
-                        # Defaults
                         if up is None and (v.price_ttc is not None):
                             up = v.price_ttc
                         if dep is None:
                             dep = U.default_deposit_for_product(v.product)
 
-                        # Contrôle des retours
                         if mtype == "IN":
                             open_q = int(open_map.get(vid_int, 0))
                             if qty_int > open_q:
                                 label = f"{v.product.name} — {v.size_l} L" if v.size_l else f"{v.product.name}"
                                 violations.append((label, open_q))
-                                # on skippe cette ligne et on continue pour signaler après
                                 continue
 
-                    # Crée la ligne mouvement (même qty=0 si nécessaire pour porter les notes)
                     mv = Movement(
                         client_id=client_id2,
                         variant_id=vid_int,
@@ -686,16 +711,13 @@ def create_app():
                     )
                     db.session.add(mv)
 
-                    # MàJ inventaire
                     if not is_equipment_only:
                         inv = U.get_or_create_inventory(vid_int)
                         if mtype == "OUT":
                             inv.qty = (inv.qty or 0) - qty_int
                         elif mtype == "FULL":
                             inv.qty = (inv.qty or 0) + qty_int
-                        # mtype == IN n'affecte pas le stock bar
 
-                # Si violations => retour étape 2 avec message clair
                 if violations:
                     text = "Certains retours dépassent l’enjeu autorisé : " + ", ".join(
                         f"{lab} (max {q})" for lab, q in violations
