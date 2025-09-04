@@ -74,3 +74,30 @@ body {
   .list-row{ grid-template-columns: 1fr; align-items:flex-start; }
   .col-eq{ text-align:left; }
 }
+/* === Accueil : liste par client façon “pills” === */
+.header-line{
+  display:flex; align-items:center; justify-content:space-between; gap:1rem;
+}
+.list-rows{ display:flex; flex-direction:column; gap:.75rem; }
+.list-row{
+  display:grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr minmax(220px, 1fr);
+  align-items:center; gap:1rem;
+}
+.col-name a{ color:#1463ff; text-decoration:none; }
+.col-name a:hover{ text-decoration:underline; }
+
+.col-pills{ display:flex; flex-wrap:wrap; gap:.5rem; }
+.pill{
+  display:inline-block; padding:.35rem .7rem;
+  border-radius:999px; background:#f1f3f5; color:#333; border:1px solid #e3e6e9;
+  font-size:.92rem; line-height:1;
+}
+.pill-cup{ background:#e6fff9; border-color:#bdebe1; }
+
+.col-eq{ text-align:right; color:#555; }
+.muted{ color:#777; }
+@media (max-width: 900px){
+  .list-row{ grid-template-columns: 1fr; align-items:flex-start; }
+  .col-eq{ text-align:left; }
+}
