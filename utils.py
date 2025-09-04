@@ -7,10 +7,12 @@ from datetime import datetime, timezone
 from sqlalchemy import func
 from models import db, Client, Product, Variant, Movement, Inventory
 
-# ---------- Petites aides ----------
+# ---------- Helpers temporels ----------
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+# ---------- Détections produit ----------
 
 def _is_equipment_only(name: str | None) -> bool:
     if not name:
@@ -101,7 +103,7 @@ def _parse_equipment_notes(notes: str | None) -> Dict[str, int]:
     res = {"tireuse": 0, "co2": 0, "comptoir": 0, "tonnelle": 0}
     if not notes:
         return res
-    parts = [p.strip() for p in notes.split(";") if p.strip()]
+    parts = [p.strip() for p in (notes or "").split(";") if p.strip()]
     for p in parts:
         if "=" in p:
             k, v = p.split("=", 1)
@@ -209,7 +211,6 @@ def summarize_client_for_index(client: Client) -> Dict:
     equipment = compute_equipment_in_play(client.id)
     kegs_qty = open_kegs_qty_for_client(client.id)
 
-    # "Bière facturée" simple : somme OUT (prix TTC de la variante si champ vide)
     billed = (
         db.session.query(
             func.coalesce(Movement.unit_price_ttc, Variant.price_ttc, 0.0) * Movement.qty
@@ -258,11 +259,35 @@ def summarize_totals(cards: List[Dict]) -> Dict[str, float]:
 def summarize_client_detail(client: Client) -> Dict:
     """
     Données complètes pour la fiche client.
+    Ajoute 'beer_eur' pour compatibilité avec app.py.
     """
     cup_eur, cup_qty, keg_eur, keg_qty = compute_deposits_split(client.id)
     equipment = compute_equipment_in_play(client.id)
     kegs_qty = open_kegs_qty_for_client(client.id)
     open_rows = open_kegs_by_variant(client.id)
+
+    # même calcul que l'accueil pour la bière facturée
+    billed = (
+        db.session.query(
+            func.coalesce(Movement.unit_price_ttc, Variant.price_ttc, 0.0) * Movement.qty
+        )
+        .join(Variant, Movement.variant_id == Variant.id)
+        .join(Product, Variant.product_id == Product.id)
+        .filter(
+            Movement.client_id == client.id,
+            Movement.type == "OUT",
+            ~Product.name.ilike("%ecocup%"),
+            ~Product.name.ilike("%eco cup%"),
+            ~Product.name.ilike("%gobelet%"),
+        )
+        .all()
+    )
+    beer_eur = 0.0
+    for (val,) in billed:
+        try:
+            beer_eur += float(val or 0.0)
+        except Exception:
+            pass
 
     return {
         "client_id": client.id,
@@ -270,10 +295,11 @@ def summarize_client_detail(client: Client) -> Dict:
         "equipment": equipment,
         "kegs_qty": kegs_qty,
         "deposits": {
-            "cup_eur": cup_eur, "cup_qty": cup_qty,
-            "keg_eur": keg_eur, "keg_qty": keg_qty,
+            "cup_eur": round(cup_eur, 2), "cup_qty": int(cup_qty),
+            "keg_eur": round(keg_eur, 2), "keg_qty": int(keg_qty),
         },
         "open_by_variant": open_rows,  # liste de dicts
+        "beer_eur": round(beer_eur, 2),  # <<< clé attendue par app.py
     }
 
 # ---------- Stock / catalogue ----------
