@@ -1,5 +1,6 @@
 # app.py — WSGI target: gunicorn app:app
 import os
+import itertools
 from datetime import datetime, date, time
 from types import SimpleNamespace
 
@@ -189,16 +190,16 @@ def create_app():
         return render_template(
             "client_detail.html",
             client=c,
-            c=c,  # pour compatibilité avec certains templates
+            c=c,  # compat éventuelle dans les templates
             view=view,
             movements=movements,
             beer_billed_cum=view.get("beer_eur", 0.0),
-            deposit_in_play=view.get("deposit_eur", 0.0),  # compat ancien
+            deposit_in_play=view.get("deposit_eur", 0.0),
             equipment_totals=view.get("equipment", {}),
             liters_out_cum=view.get("liters_out_cum", 0.0),
             litres_out_cum=view.get("liters_out_cum", 0.0),
 
-            # Nouvelles variables
+            # Nouvelles variables séparant consignes
             deposit_cup_eur=dep_cup_eur,
             deposit_keg_eur=dep_keg_eur,
             cup_qty_in_play=cup_qty,
@@ -242,7 +243,7 @@ def create_app():
             return render_template(
                 "client_confirm_delete.html",
                 client=c,
-                c=c,  # compat template
+                c=c,
                 mv_count=mv_count,
                 open_total=open_total,
                 open_details=open_details,
@@ -565,10 +566,12 @@ def create_app():
         # --- ÉTAPE 4 : saisie + enregistrement ---
         if step == 4:
             if request.method == "POST":
+                # Garde-fous : client/type obligatoires
                 if (wiz.get("client_id") is None) or (wiz.get("type") is None):
                     flash("Informations incomplètes.", "warning")
                     return redirect(url_for("movement_wizard", step=1))
 
+                # Date choisie (ou fallback now)
                 if wiz.get("date"):
                     try:
                         y, m_, d2 = [int(x) for x in wiz["date"].split("-")]
@@ -578,10 +581,11 @@ def create_app():
                 else:
                     created_at = U.now_utc()
 
-                variant_ids = request.form.getlist("variant_id")
-                qtys = request.form.getlist("qty")
-                unit_prices = request.form.getlist("unit_price_ttc")
-                deposits = request.form.getlist("deposit_per_keg")
+                # Champs postés (tolérance aux listes vides/désalignées)
+                variant_ids = request.form.getlist("variant_id") or request.form.getlist("variant_ids") or []
+                qtys = request.form.getlist("qty") or []
+                unit_prices = request.form.getlist("unit_price_ttc") or []
+                deposits = request.form.getlist("deposit_per_keg") or []
                 notes = request.form.get("notes") or None
 
                 # Encodage matériel prêté dans notes (tireuse, CO2, comptoir, tonnelle)
@@ -596,60 +600,80 @@ def create_app():
                 if ton: equip_parts.append(f"tonnelle={ton}")
                 notes = (";".join(equip_parts) + (";" + notes if notes else "")) or None
 
+                # Si aucun produit => retour étape 2
+                if not variant_ids:
+                    flash("Sélectionne au moins un produit.", "warning")
+                    return redirect(url_for("movement_wizard", step=2))
+
                 client_id2 = int(wiz["client_id"])
                 mtype = wiz["type"]
 
                 violations = []
                 open_map = _open_qty_by_variant(client_id2) if mtype == "IN" else {}
 
-                for i, vid in enumerate(variant_ids):
+                # On itère proprement sur les listes (désalignement toléré)
+                for vid_str, qty_str, up_str, dep_str in itertools.zip_longest(
+                    variant_ids, qtys, unit_prices, deposits, fillvalue=""
+                ):
+                    # id variante
                     try:
-                        vid_int = int(vid)
+                        vid_int = int(vid_str)
                     except Exception:
                         continue
 
+                    # quantité
                     try:
-                        qty_int = int(qtys[i])
+                        qty_int = int(qty_str) if str(qty_str).strip() != "" else 0
                     except Exception:
                         qty_int = 0
 
+                    # prix unitaire (optionnel)
                     up = None
-                    if i < len(unit_prices) and unit_prices[i] not in ("", None):
+                    if str(up_str).strip() != "":
                         try:
-                            up = float(unit_prices[i].replace(",", "."))
+                            up = float(str(up_str).replace(",", "."))
                         except Exception:
                             up = None
 
+                    # consigne ligne (optionnelle)
                     dep = None
-                    if i < len(deposits) and deposits[i] not in ("", None):
+                    if str(dep_str).strip() != "":
                         try:
-                            dep = float(deposits[i].replace(",", "."))
+                            dep = float(str(dep_str).replace(",", "."))
                         except Exception:
                             dep = None
 
+                    # Variante
                     v = Variant.query.get(vid_int)
                     if not v:
                         continue
 
+                    # Matériel seul ?
                     pname = (v.product.name if v and v.product else "") or ""
                     is_equipment_only = ("matériel" in pname.lower() or "materiel" in pname.lower()) and ("seul" in pname.lower())
                     if is_equipment_only:
+                        # On n’enregistre pas de ligne chiffrée, le prêt est encodé dans notes.
+                        # Pour conserver la trace du prêt même sans autre ligne, on autorise qty=0.
                         qty_int = 0
                         up = 0.0
                         dep = 0.0
                     else:
+                        # Defaults
                         if up is None and (v.price_ttc is not None):
                             up = v.price_ttc
                         if dep is None:
                             dep = U.default_deposit_for_product(v.product)
 
+                        # Contrôle des retours
                         if mtype == "IN":
                             open_q = int(open_map.get(vid_int, 0))
-                            if open_q <= 0 or qty_int > open_q:
+                            if qty_int > open_q:
                                 label = f"{v.product.name} — {v.size_l} L" if v.size_l else f"{v.product.name}"
                                 violations.append((label, open_q))
+                                # on skippe cette ligne et on continue pour signaler après
                                 continue
 
+                    # Crée la ligne mouvement (même qty=0 si nécessaire pour porter les notes)
                     mv = Movement(
                         client_id=client_id2,
                         variant_id=vid_int,
@@ -662,12 +686,16 @@ def create_app():
                     )
                     db.session.add(mv)
 
-                    inv = U.get_or_create_inventory(vid_int)
-                    if mtype == "OUT":
-                        inv.qty = (inv.qty or 0) - qty_int
-                    elif mtype == "FULL":
-                        inv.qty = (inv.qty or 0) + qty_int
+                    # MàJ inventaire
+                    if not is_equipment_only:
+                        inv = U.get_or_create_inventory(vid_int)
+                        if mtype == "OUT":
+                            inv.qty = (inv.qty or 0) - qty_int
+                        elif mtype == "FULL":
+                            inv.qty = (inv.qty or 0) + qty_int
+                        # mtype == IN n'affecte pas le stock bar
 
+                # Si violations => retour étape 2 avec message clair
                 if violations:
                     text = "Certains retours dépassent l’enjeu autorisé : " + ", ".join(
                         f"{lab} (max {q})" for lab, q in violations
@@ -680,6 +708,7 @@ def create_app():
                 session.pop("wiz", None)
                 return redirect(url_for("client_detail", client_id=client_id2))
 
+            # GET step 4 : affichage
             selected = []
             for vid in wiz.get("variant_ids", []):
                 v = Variant.query.get(vid)
