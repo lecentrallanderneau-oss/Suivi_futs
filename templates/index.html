@@ -1,39 +1,79 @@
+{# templates/index.html #}
 {% extends "base.html" %}
 {% import "_macros.html" as ui %}
-{% block title %}Fûts · Accueil{% endblock %}
+
 {% block content %}
+<h1 class="page-title">Tableau de bord</h1>
 
 {{ ui.alerts_list(alerts) }}
 
-<div class="d-flex align-items-center justify-content-between">
-  <h1 class="h3 mb-0">Stock par client</h1>
-  <a href="{{ url_for('movement_wizard') }}" class="btn btn-primary">+ Saisie</a>
+{% if totals %}
+<div class="cards-row">
+  <div class="card stat">
+    <div class="card-title">Clients</div>
+    <div class="card-big">{{ totals.total_clients }}</div>
+  </div>
+  <div class="card stat">
+    <div class="card-title">En jeu (unités)</div>
+    <div class="card-big">{{ totals.total_open }}</div>
+  </div>
+  <div class="card stat">
+    <div class="card-title">Consignes totales</div>
+    <div class="card-big">{{ "%.2f"|format(totals.total_deposit) }} €</div>
+  </div>
+  <div class="card stat">
+    <div class="card-title">Litres livrés (cum.)</div>
+    <div class="card-big">{{ totals.liters }}</div>
+  </div>
+  <div class="card stat">
+    <div class="card-title">CA bière (cum.)</div>
+    <div class="card-big">{{ "%.2f"|format(totals.beer_eur) }} €</div>
+  </div>
 </div>
-<hr>
+{% endif %}
 
-<div class="card-list">
+<div class="cards-grid">
   {% for c in cards %}
-    <div class="row-item">
-      <div class="d-flex align-items-start justify-content-between">
-        <div>
-          <a class="client-link" href="{{ url_for('client_detail', client_id=c.id) }}">{{ c.name }}</a>
-          <div class="text-muted small">
-            {% if c.last_out %}Dernière livraison : {{ c.last_out|dt }} · {% endif %}
-            {% if c.last_in %}Dernière reprise : {{ c.last_in|dt }}{% endif %}
-          </div>
-        </div>
-        <div class="text-end">
-          <div class="mb-1">
-            <span class="chip chip-gray">{{ c.kegs }} fût(s)</span>
-            <span class="chip chip-cyan">Bière facturée: {{ '%.2f'|format(c.beer_eur or 0) }} €</span>
-            <span class="chip chip-amber">Consignes: {{ '%.2f'|format(c.deposit_eur or 0) }} €</span>
-          </div>
-        </div>
-        {{ ui.equipment_badges(c.equipment) }}
-      </div>
+  <div class="card client">
+    <div class="card-header">
+      <a class="client-link" href="{{ url_for('client_detail', client_id=c.id) }}">{{ c.name }}</a>
     </div>
-  {% else %}
-    <div class="row-item text-center text-muted">Aucun client.</div>
+
+    <div class="card-body">
+      <div class="row-line">
+        <span class="label">En jeu total</span>
+        <span class="value">{{ c.open_total }}</span>
+      </div>
+
+      <div class="row-line">
+        <span class="label">Litres livrés (cum.)</span>
+        <span class="value">{{ c.liters_out_cum }}</span>
+      </div>
+
+      <div class="row-line">
+        <span class="label">CA bière (cum.)</span>
+        <span class="value">{{ "%.2f"|format(c.beer_eur) }} €</span>
+      </div>
+
+      <div class="row-line">
+        <span class="label">Consignes</span>
+        <span class="value">
+          {{ "%.2f"|format(c.deposit_eur) }} €
+        </span>
+      </div>
+
+      {# >>> Affichage demandé : consignes séparées Fûts / Gobelets #}
+      {{ ui.deposit_split_badges(c) }}
+
+      {# Badges matériel s’il y en a #}
+      {{ ui.equipment_badges(c.equipment) }}
+    </div>
+
+    <div class="card-footer">
+      <a class="btn btn-sm" href="{{ url_for('client_detail', client_id=c.id) }}">Voir la fiche</a>
+      <a class="btn btn-sm btn-primary" href="{{ url_for('movement_new') }}?client_id={{ c.id }}">Nouveau mouvement</a>
+    </div>
+  </div>
   {% endfor %}
 </div>
 {% endblock %}
