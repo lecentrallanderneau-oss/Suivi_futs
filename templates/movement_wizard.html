@@ -1,157 +1,150 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 {% block title %}Saisie mouvement{% endblock %}
 
 {% block content %}
-<h1 class="h3 mb-3">Nouveau mouvement</h1>
+<h1>Saisie d’un mouvement</h1>
 
-{# ====== ÉTAPE 1 ====== #}
-{% if step == 1 %}
-<form method="post" action="{{ url_for('movement_wizard', step=1) }}" class="row g-3">
+{% set step = step or 1 %}
+{% set wiz = wiz or {} %}
 
-  {% if prefill_client %}
-    <div class="col-12">
-      <label class="form-label">Client</label>
-      <div class="form-control-plaintext">
-        <strong>{{ prefill_client.name }}</strong>
-        <a class="ms-2 small" href="{{ url_for('movement_wizard', step=1, clear_client=1) }}">(changer)</a>
-      </div>
+<div class="card">
+  <div class="card-body">
+    <div class="mb-3">
+      Étapes :
+      <span class="badge bg-{{ 'primary' if step==1 else 'secondary' }}">1. Type & date</span>
+      <span class="badge bg-{{ 'primary' if step==2 else 'secondary' }}">2. Choix produits</span>
+      <span class="badge bg-{{ 'primary' if step==4 else 'secondary' }}">3. Quantités & validation</span>
     </div>
-  {% else %}
-    <div class="col-md-6">
-      <label class="form-label">Client</label>
-      <select name="client_id" class="form-select" required>
-        <option value="" selected disabled>Choisir…</option>
-        {% for c in clients %}
-          <option value="{{ c.id }}">{{ c.name }}</option>
-        {% endfor %}
-      </select>
-    </div>
-  {% endif %}
 
-  <div class="col-md-3">
-    <label class="form-label">Type</label>
-    <select name="type" class="form-select" required>
-      <option value="" selected disabled>Choisir…</option>
-      <option value="OUT">Livraison (OUT)</option>
-      <option value="IN">Reprise (IN)</option>
-      <option value="FULL">Retour plein (FULL)</option>
-      <option value="DEFECT">Défectueux (DEFECT)</option>
-    </select>
-  </div>
-  <div class="col-md-3">
-    <label class="form-label">Date</label>
-    <input type="date" name="date" class="form-control" value="">
-  </div>
-  <div class="col-12">
-    <button type="submit" class="btn btn-primary">Continuer</button>
-  </div>
-</form>
-{% endif %}
+    {% if step == 1 %}
+      <form method="post">
+        <div class="row g-3">
+          <div class="col-md-4">
+            <label class="form-label">Client</label>
+            <select class="form-select" name="client_id" required>
+              <option value="">—</option>
+              {% for c in (clients or []) %}
+                <option value="{{ c.id }}" {% if prefill_client and prefill_client.id==c.id %}selected{% endif %}>{{ c.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">Type</label>
+            <select class="form-select" name="type" required>
+              <option value="">—</option>
+              {% for t in ["OUT","IN","FULL"] %}
+                <option value="{{ t }}" {% if wiz.type==t %}selected{% endif %}>{{ t }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">Date</label>
+            <input type="date" class="form-control" name="date" value="{{ wiz.date or '' }}">
+          </div>
+        </div>
+        <div class="mt-3">
+          <button class="btn btn-primary" type="submit">Continuer</button>
+        </div>
+      </form>
+    {% elif step == 2 %}
+      <form method="post">
+        <p class="text-muted">Sélectionne une ou plusieurs références.</p>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Produit</th>
+                <th>Volume</th>
+                <th>Prix TTC</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for v,p in (rows or []) %}
+                <tr>
+                  <td style="width:36px;"><input type="checkbox" name="variant_id" value="{{ v.id }}"></td>
+                  <td>{{ p.name }}</td>
+                  <td>{{ v.size_l if v.size_l is not none else '—' }} L</td>
+                  <td>{{ (v.price_ttc or 0) | eur }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="d-flex gap-2">
+          <a class="btn btn-outline-secondary" href="{{ url_for('movement_wizard', step=1) }}">Retour</a>
+          <button class="btn btn-primary" type="submit">Continuer</button>
+        </div>
+      </form>
+    {% elif step == 4 %}
+      <form method="post">
+        <p class="text-muted">Renseigne les quantités. Les prix/consignes sont pré-remplis si définis au catalogue.</p>
 
-{# ====== ÉTAPE 2 ====== #}
-{% if step == 2 %}
-<form method="post" action="{{ url_for('movement_wizard', step=2) }}">
-  {% if prefill_client %}
-  <div class="mb-2 text-muted">Client : <strong>{{ prefill_client.name }}</strong></div>
-  {% endif %}
-  <div class="table-responsive">
-    <table class="table align-middle">
-      <thead>
-        <tr>
-          <th style="width:50px;"></th>
-          <th>Produit</th>
-          <th style="width:120px;">Taille</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for v, p in rows %}
-        <tr>
-          <td><input class="form-check-input" type="checkbox" name="variant_id" value="{{ v.id }}"></td>
-          <td>{{ p.name }}</td>
-          <td>{% if v.size_l %}{{ ('%.1f'|format(v.size_l)).rstrip('0').rstrip('.') }} L{% else %}—{% endif %}</td>
-        </tr>
-      {% else %}
-        <tr><td colspan="3" class="text-muted text-center">Aucune variante.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  <div class="d-flex gap-2">
-    <a href="{{ url_for('movement_wizard', step=1) }}" class="btn btn-outline-secondary">Retour</a>
-    <button type="submit" class="btn btn-primary">Continuer</button>
-  </div>
-</form>
-{% endif %}
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Produit</th>
+                <th>Volume</th>
+                <th>Qté</th>
+                <th>Prix TTC (unité)</th>
+                <th>Consigne (unité)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for v,p in (selected or rows or []) %}
+                <tr>
+                  <td>
+                    {{ p.name }}
+                    <input type="hidden" name="variant_id" value="{{ v.id }}">
+                  </td>
+                  <td>{{ v.size_l if v.size_l is not none else '—' }} L</td>
+                  <td style="width: 120px;"><input type="number" class="form-control form-control-sm" name="qty" min="0" step="1" value="0"></td>
+                  <td style="width: 160px;">
+                    <input type="text" class="form-control form-control-sm" name="unit_price_ttc"
+                      value="{{ '' if v.price_ttc is none else ('%.2f'|format(v.price_ttc)) }}">
+                  </td>
+                  <td style="width: 160px;">
+                    <input type="text" class="form-control form-control-sm" name="deposit_per_keg"
+                      value="">
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
 
-{# ====== ÉTAPE 4 ====== #}
-{% if step == 4 %}
-<form method="post" action="{{ url_for('movement_wizard', step=4) }}">
-  {% if prefill_client %}
-  <div class="mb-2 text-muted">Client : <strong>{{ prefill_client.name }}</strong></div>
-  {% endif %}
+        <div class="row g-3">
+          <div class="col-md-3">
+            <label class="form-label">Tireuses</label>
+            <input type="number" class="form-control form-control-sm" name="eq_tireuse" min="0" step="1" value="0">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">CO₂</label>
+            <input type="number" class="form-control form-control-sm" name="eq_co2" min="0" step="1" value="0">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Comptoir</label>
+            <input type="number" class="form-control form-control-sm" name="eq_comptoir" min="0" step="1" value="0">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Tonnelle</label>
+            <input type="number" class="form-control form-control-sm" name="eq_tonnelle" min="0" step="1" value="0">
+          </div>
+        </div>
 
-  {% if selected and selected|length > 0 %}
-  <div class="table-responsive mb-3">
-    <table class="table align-middle">
-      <thead>
-        <tr>
-          <th>Produit</th>
-          <th style="width:120px;">Taille</th>
-          <th style="width:120px;">Qté</th>
-          <th style="width:160px;">Prix unitaire TTC</th>
-          <th style="width:160px;">Consigne / unité</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for v, p in selected %}
-        {% set is_ecocup = ('ecocup' in (p.name|lower) or 'gobelet' in (p.name|lower)) %}
-        <tr>
-          <td>
-            <input type="hidden" name="variant_id" value="{{ v.id }}">
-            {{ p.name }}
-          </td>
-          <td>{% if v.size_l %}{{ ('%.1f'|format(v.size_l)).rstrip('0').rstrip('.') }} L{% else %}—{% endif %}</td>
-          <td><input type="number" name="qty" class="form-control" min="0" step="1" value="0" required></td>
-          <td><input type="number" name="unit_price_ttc" class="form-control" min="0" step="0.01"
-                     placeholder="{{ ('%.2f'|format(v.price_ttc if v.price_ttc is not none else 0)).replace('.', ',') }}"></td>
-          <td><input type="number" name="deposit_per_keg" class="form-control" min="0" step="0.01"
-                     placeholder="{{ '1,00' if is_ecocup else '30,00' }}"></td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% else %}
-    <div class="alert alert-warning">Aucune variante sélectionnée. <a href="{{ url_for('movement_wizard', step=2) }}">Retour étape 2</a></div>
-  {% endif %}
+        <div class="mt-3">
+          <label class="form-label">Notes</label>
+          <textarea class="form-control" name="notes" rows="2" placeholder="Infos complémentaires (facultatif)"></textarea>
+        </div>
 
-  <div class="row g-3">
-    <div class="col-md-2">
-      <label class="form-label">Tireuses</label>
-      <input type="number" name="eq_tireuse" class="form-control" min="0" step="1" value="0">
-    </div>
-    <div class="col-md-2">
-      <label class="form-label">CO₂</label>
-      <input type="number" name="eq_co2" class="form-control" min="0" step="1" value="0">
-    </div>
-    <div class="col-md-3">
-      <label class="form-label">Comptoirs</label>
-      <input type="number" name="eq_comptoir" class="form-control" min="0" step="1" value="0">
-    </div>
-    <div class="col-md-3">
-      <label class="form-label">Tonnelles</label>
-      <input type="number" name="eq_tonnelle" class="form-control" min="0" step="1" value="0">
-    </div>
-    <div class="col-12">
-      <label class="form-label">Notes</label>
-      <textarea name="notes" class="form-control" rows="2" placeholder="Ex: tireuse=1;co2=2"></textarea>
-    </div>
+        <div class="mt-3 d-flex gap-2">
+          <a class="btn btn-outline-secondary" href="{{ url_for('movement_wizard', step=2) }}">Retour</a>
+          <button class="btn btn-primary" type="submit">Enregistrer</button>
+        </div>
+      </form>
+    {% endif %}
   </div>
-
-  <div class="d-flex gap-2 mt-3">
-    <a href="{{ url_for('movement_wizard', step=2) }}" class="btn btn-outline-secondary">Retour</a>
-    <button type="submit" class="btn btn-primary">Enregistrer</button>
-  </div>
-</form>
-{% endif %}
+</div>
 {% endblock %}
