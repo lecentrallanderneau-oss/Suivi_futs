@@ -2,110 +2,57 @@
 {% import "_macros.html" as ui %}
 
 {% block content %}
-  <section class="hero">
-    <h1>Suivi fûts</h1>
-    <p class="muted">Tableau de bord</p>
-  </section>
+<div class="header-line">
+  <h1>{{ c.name }}</h1>
+  <div class="btn-group">
+    <a class="btn btn-primary" href="{{ url_for('movement_new', client_id=c.id) }}">+ Nouveau mouvement</a>
+    <a class="btn btn-outline-secondary" href="{{ url_for('client_edit', client_id=c.id) }}">Modifier</a>
+    <a class="btn btn-outline-danger" href="{{ url_for('client_confirm_delete', client_id=c.id) }}">Supprimer</a>
+  </div>
+</div>
 
-  <section class="bubbles">
-    <h2>🎯 Aujourd’hui</h2>
-    {% if day_movements and day_movements|length %}
-      <ul class="bubble-row">
-        {% for m in day_movements %}
-          <li class="bubble">
-            <div class="bubble-type {{ 'is-delivery' if m.movement_type == 'delivery' else 'is-return' }}">
-              {{ 'Livraison' if m.movement_type == 'delivery' else 'Reprise' }}
-            </div>
-            <div class="bubble-body">
-              <div class="bubble-title">
-                <a href="{{ url_for('client_detail', client_id=m.client_id) }}">
-                  {{ m.client.name if m.client and (m.client.name is defined) else ('Client #' ~ m.client_id) }}
-                </a>
-              </div>
-              <div class="bubble-meta">
-                {{ (m.qty or 0) }} × {{ m.product or '—' }}
-                {% if m.keg_serial %} • Fût {{ m.keg_serial }}{% endif %}
-              </div>
-              <div class="bubble-time">
-                {{ m.created_at }}
-              </div>
-            </div>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">Aucun mouvement saisi aujourd’hui.</p>
-    {% endif %}
-  </section>
+<div class="grid-2">
+  <div class="card">
+    <div class="card-header">Récapitulatif</div>
+    <div class="card-body">
+      <div class="pills">
+        <span class="pill pill-muted">Fûts en jeu: {{ view.kegs_qty }}</span>
+        <span class="pill">Consignes fûts: {{ ui.eur(view.deposits.keg_eur) }} ({{ view.deposits.keg_qty }} uds)</span>
+        <span class="pill pill-cup">Consigne gobelets: {{ ui.eur(view.deposits.cup_eur) }} ({{ view.deposits.cup_qty }} uds)</span>
+      </div>
+      <div class="mt-2">
+        <div><strong>Matériel prêté</strong></div>
+        {{ ui.equipment_badges(view.equipment) }}
+      </div>
+      {% if c.notes %}
+      <hr/>
+      <div class="muted">Notes : {{ c.notes }}</div>
+      {% endif %}
+    </div>
+  </div>
 
-  <section class="bubbles">
-    <h2>🕘 Derniers mouvements</h2>
-    {% if recent_movements and recent_movements|length %}
-      <ul class="bubble-row">
-        {% for m in recent_movements %}
-          <li class="bubble">
-            <div class="bubble-type {{ 'is-delivery' if m.movement_type == 'delivery' else 'is-return' }}">
-              {{ 'Livraison' if m.movement_type == 'delivery' else 'Reprise' }}
-            </div>
-            <div class="bubble-body">
-              <div class="bubble-title">
-                <a href="{{ url_for('client_detail', client_id=m.client_id) }}">
-                  {{ m.client.name if m.client and (m.client.name is defined) else ('Client #' ~ m.client_id) }}
-                </a>
-              </div>
-              <div class="bubble-meta">
-                {{ (m.qty or 0) }} × {{ m.product or '—' }}
-                {% if m.keg_serial %} • Fût {{ m.keg_serial }}{% endif %}
-              </div>
-              <div class="bubble-time">
-                {{ m.created_at }}
-              </div>
-            </div>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">Pas d’historique récent.</p>
-    {% endif %}
-  </section>
-
-  <section class="clients">
-    <h2>👥 Clients</h2>
-    {% if clients and clients|length %}
-      <ul class="client-grid">
-        {% for c in clients %}
-          <li class="client-card">
-            <a href="{{ url_for('client_detail', client_id=c.id) }}">
-              <div class="client-name">{{ c.name }}</div>
-              {% if c.address %}<div class="client-sub">{{ c.address }}</div>{% endif %}
-            </a>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">Aucun client pour le moment.</p>
-    {% endif %}
-  </section>
-{% endblock %}
-
-{% block extra_css %}
-<style>
-  .hero h1 { margin:0 }
-  .muted { color:#777 }
-  .bubbles { margin: 1rem 0 1.5rem 0 }
-  .bubble-row { list-style:none; display:flex; gap:.75rem; padding:0; margin:0; overflow:auto }
-  .bubble { border:1px solid #e5e5e5; background:#fff; border-radius:1rem; padding:.6rem .8rem; min-width:220px }
-  .bubble-type { font-size:.75rem; font-weight:700; margin-bottom:.25rem; display:inline-block; padding:.1rem .4rem; border-radius:.5rem; border:1px solid #ddd }
-  .bubble-type.is-delivery { background:#e9fbf4; border-color:#a6e8cf }
-  .bubble-type.is-return { background:#f4f7ff; border-color:#c9d6ff }
-  .bubble-title a { font-weight:700; text-decoration:none; color:#111 }
-  .bubble-meta { color:#444; margin-top:.15rem }
-  .bubble-time { color:#999; font-size:.8rem; margin-top:.15rem; white-space:nowrap }
-  .clients { margin-top: 2rem }
-  .client-grid { list-style:none; display:grid; gap:.75rem; padding:0; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); }
-  .client-card { border:1px solid #eee; border-radius:.8rem; background:#fff }
-  .client-card a { display:block; padding:.9rem .9rem; text-decoration:none; color:inherit }
-  .client-name { font-weight:700 }
-  .client-sub { color:#666; font-size:.9rem; margin-top:.1rem }
-</style>
+  <div class="card">
+    <div class="card-header">Fûts en jeu (détail)</div>
+    <div class="card-body">
+      {% if view.open_by_variant %}
+      <table class="table">
+        <thead>
+          <tr><th>Produit</th><th>Contenance</th><th class="ta-right">En jeu</th></tr>
+        </thead>
+        <tbody>
+          {% for r in view.open_by_variant %}
+          <tr>
+            <td>{{ r.product_name }}</td>
+            <td>{{ r.size_l }} L</td>
+            <td class="ta-right"><strong>{{ r.qty_open }}</strong></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="muted">Aucun fût en jeu.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
 {% endblock %}
