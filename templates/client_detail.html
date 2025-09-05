@@ -2,122 +2,57 @@
 {% import "_macros.html" as ui %}
 
 {% block content %}
-  {# On supporte 'c' ou 'client' #}
-  {% set ctx = (c if (c is defined) else (client if (client is defined) else none)) %}
+<div class="header-line">
+  <h1>{{ c.name }}</h1>
+  <div class="btn-group">
+    <a class="btn btn-primary" href="{{ url_for('movement_new', client_id=c.id) }}">+ Nouveau mouvement</a>
+    <a class="btn btn-outline-secondary" href="{{ url_for('client_edit', client_id=c.id) }}">Modifier</a>
+    <a class="btn btn-outline-danger" href="{{ url_for('client_confirm_delete', client_id=c.id) }}">Supprimer</a>
+  </div>
+</div>
 
-  <section class="page-header">
-    <h1>{{ ctx.name if ctx else "Client" }}</h1>
-    <p class="muted">ID : {{ ctx.id if (ctx and (ctx.id is defined)) else "—" }}</p>
-    <p>
-      <a href="{{ url_for('index') }}" class="btn">← Retour à l’accueil</a>
-      {% if ctx and ctx.id is defined %}
-        <a href="{{ url_for('client_edit', client_id=ctx.id) }}" class="btn btn-secondary">Modifier</a>
+<div class="grid-2">
+  <div class="card">
+    <div class="card-header">Récapitulatif</div>
+    <div class="card-body">
+      <div class="pills">
+        <span class="pill pill-muted">Fûts en jeu: {{ view.kegs_qty }}</span>
+        <span class="pill">Consignes fûts: {{ ui.eur(view.deposits.keg_eur) }} ({{ view.deposits.keg_qty }} uds)</span>
+        <span class="pill pill-cup">Consigne gobelets: {{ ui.eur(view.deposits.cup_eur) }} ({{ view.deposits.cup_qty }} uds)</span>
+      </div>
+      <div class="mt-2">
+        <div><strong>Matériel prêté</strong></div>
+        {{ ui.equipment_badges(view.equipment) }}
+      </div>
+      {% if c.notes %}
+      <hr/>
+      <div class="muted">Notes : {{ c.notes }}</div>
       {% endif %}
-    </p>
-  </section>
-
-  {% if ctx and ctx.id is defined %}
-  <section class="card">
-    <h2>Actions rapides</h2>
-    <div class="actions-row">
-
-      {# Démarre le wizard en GET, step=1, pré-rempli #}
-      <a
-        class="btn btn-primary"
-        href="{{ url_for('movement_wizard') }}?step=1&client_id={{ ctx.id }}&movement_type=delivery&type=delivery"
-      >+ Nouvelle livraison</a>
-
-      <a
-        class="btn"
-        href="{{ url_for('movement_wizard') }}?step=1&client_id={{ ctx.id }}&movement_type=return&type=return"
-      >↩ Nouvelle reprise</a>
     </div>
-    <p class="hint">Ouvre l’assistant de mouvement à l’étape 1 (pré-rempli avec ce client). La suite reste inchangée.</p>
-  </section>
-  {% endif %}
+  </div>
 
-  <section class="grid">
-    <div class="card">
-      <h2>Contact</h2>
-      <ul class="list">
-        <li><strong>Nom</strong> : {{ ctx.name if ctx else "—" }}</li>
-        <li><strong>Email</strong> : {{ ctx.email if (ctx and (ctx.email is defined)) else "—" }}</li>
-        <li><strong>Téléphone</strong> : {{ ctx.phone if (ctx and (ctx.phone is defined)) else "—" }}</li>
-        <li><strong>Adresse</strong> : {{ ctx.address if (ctx and (ctx.address is defined)) else "—" }}</li>
-      </ul>
-    </div>
-
-    <div class="card">
-      <h2>Fûts en circulation</h2>
-      <p class="kpi">{{ keg_qty_in_play if (keg_qty_in_play is defined) else 0 }}</p>
-    </div>
-  </section>
-
-  {% if deliveries is defined and deliveries %}
-    <section class="card">
-      <h2>Dernières livraisons</h2>
+  <div class="card">
+    <div class="card-header">Fûts en jeu (détail)</div>
+    <div class="card-body">
+      {% if view.open_by_variant %}
       <table class="table">
         <thead>
-          <tr><th>Date</th><th>Produit</th><th>Qté</th><th>N° fût</th></tr>
+          <tr><th>Produit</th><th>Contenance</th><th class="ta-right">En jeu</th></tr>
         </thead>
         <tbody>
-          {% for d in deliveries %}
-            <tr>
-              <td>{{ d.date or "—" }}</td>
-              <td>{{ d.product or "—" }}</td>
-              <td>{{ d.qty or "—" }}</td>
-              <td>{{ d.keg_serial or "—" }}</td>
-            </tr>
+          {% for r in view.open_by_variant %}
+          <tr>
+            <td>{{ r.product_name }}</td>
+            <td>{{ r.size_l }} L</td>
+            <td class="ta-right"><strong>{{ r.qty_open }}</strong></td>
+          </tr>
           {% endfor %}
         </tbody>
       </table>
-    </section>
-  {% endif %}
-
-  {% if returns is defined and returns %}
-    <section class="card">
-      <h2>Retours de fûts</h2>
-      <table class="table">
-        <thead>
-          <tr><th>Date</th><th>N° fût</th><th>État</th></tr>
-        </thead>
-        <tbody>
-          {% for r in returns %}
-            <tr>
-              <td>{{ r.date or "—" }}</td>
-              <td>{{ r.keg_serial or "—" }}</td>
-              <td>{{ r.status or "—" }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </section>
-  {% endif %}
-
-  {% if balances is defined %}
-    <section class="card">
-      <h2>Solde client</h2>
-      <ul class="list">
-        <li><strong>Fûts sortis</strong> : {{ balances.out or 0 }}</li>
-        <li><strong>Fûts rentrés</strong> : {{ balances.in or 0 }}</li>
-        <li><strong>Solde courant</strong> : {{ balances.current or 0 }}</li>
-      </ul>
-    </section>
-  {% endif %}
-{% endblock %}
-
-{% block extra_css %}
-<style>
-  .actions-row { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center }
-  .btn { border:1px solid #ccc; padding:.5rem .75rem; border-radius:.5rem; text-decoration:none; cursor:pointer; display:inline-block }
-  .btn-primary { background:#0a7; color:#fff; border-color:#0a7 }
-  .btn-secondary { background:#eee }
-  .hint { color:#777; font-size:.9rem; margin-top:.5rem }
-  .kpi { font-size:2rem; font-weight:700 }
-  .grid { display:grid; gap:1rem; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); }
-  .card { background:#fff; border:1px solid #e5e5e5; border-radius:.75rem; padding:1rem }
-  .table { width:100%; border-collapse:collapse }
-  .table th, .table td { border-top:1px solid #eee; padding:.5rem .4rem; text-align:left }
-  .muted { color:#888 }
-</style>
+      {% else %}
+      <div class="muted">Aucun fût en jeu.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
 {% endblock %}
