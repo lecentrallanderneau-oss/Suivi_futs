@@ -20,24 +20,19 @@
   <section class="card">
     <h2>Actions rapides</h2>
     <div class="actions-row">
-      {# Nouvelle LIVRAISON #}
-      <form method="post" action="{{ url_for('movement_wizard') }}?step=1" class="inline-form">
-        <input type="hidden" name="client_id" value="{{ ctx.id }}">
-        {# selon ton step1, le champ peut être 'movement_type' ou 'type' ; on met les deux pour compat #}
-        <input type="hidden" name="movement_type" value="delivery">
-        <input type="hidden" name="type" value="delivery">
-        <button type="submit" class="btn btn-primary">+ Nouvelle livraison</button>
-      </form>
 
-      {# Nouvelle REPRISE #}
-      <form method="post" action="{{ url_for('movement_wizard') }}?step=1" class="inline-form">
-        <input type="hidden" name="client_id" value="{{ ctx.id }}">
-        <input type="hidden" name="movement_type" value="return">
-        <input type="hidden" name="type" value="return">
-        <button type="submit" class="btn">↩ Nouvelle reprise</button>
-      </form>
+      {# Démarre le wizard en GET, step=1, pré-rempli #}
+      <a
+        class="btn btn-primary"
+        href="{{ url_for('movement_wizard') }}?step=1&client_id={{ ctx.id }}&movement_type=delivery&type=delivery"
+      >+ Nouvelle livraison</a>
+
+      <a
+        class="btn"
+        href="{{ url_for('movement_wizard') }}?step=1&client_id={{ ctx.id }}&movement_type=return&type=return"
+      >↩ Nouvelle reprise</a>
     </div>
-    <p class="hint">Ces actions ouvrent l’assistant de mouvement directement à l’étape 1, pré-rempli avec ce client.</p>
+    <p class="hint">Ouvre l’assistant de mouvement à l’étape 1 (pré-rempli avec ce client). La suite reste inchangée.</p>
   </section>
   {% endif %}
 
@@ -109,14 +104,12 @@
       </ul>
     </section>
   {% endif %}
-
 {% endblock %}
 
 {% block extra_css %}
 <style>
   .actions-row { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center }
-  .inline-form { display:inline }
-  .btn { border:1px solid #ccc; padding:.5rem .75rem; border-radius:.5rem; text-decoration:none; cursor:pointer }
+  .btn { border:1px solid #ccc; padding:.5rem .75rem; border-radius:.5rem; text-decoration:none; cursor:pointer; display:inline-block }
   .btn-primary { background:#0a7; color:#fff; border-color:#0a7 }
   .btn-secondary { background:#eee }
   .hint { color:#777; font-size:.9rem; margin-top:.5rem }
