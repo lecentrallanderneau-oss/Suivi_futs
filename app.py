@@ -1,5 +1,3 @@
-from datetime import datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo
 # app.py — WSGI target: gunicorn app:app
 import os
 from datetime import datetime, date, time
@@ -165,26 +163,13 @@ def create_app():
         return query.filter(~and_(is_cup, is_maintenance))
 
     # ----------------- Pages -----------------
-    # (laisse une ligne vide au-dessus)
-
-@app.route("/")
-def index():
-    """
-    Accueil : affiche
-      - les mouvements "d'aujourd'hui" en Europe/Paris (livraisons + reprises)
-      - les 12 derniers mouvements (toutes dates)
-      - la liste des clients
-    """
-    from datetime import datetime, time, timedelta, timezone  # import local safe
-    from zoneinfo import ZoneInfo
-
-    tz = ZoneInfo("Europe/Paris")
-    now_paris = datetime.now(tz)
-    start_paris = datetime.combine(now_paris.date(), time(0, 0, 0), tzinfo=tz)
-    end_paris = start_paris + timedelta(days=1) - timedelta(microseconds=1)
-
-    # Si votre colonne created_at_
-
+    @app.route("/")
+    def index():
+        clients = Client.query.order_by(Client.name.asc()).all()
+        cards = [U.summarize_client_for_index(c) for c in clients]
+        totals = U.summarize_totals(cards)
+        alerts = U.compute_reorder_alerts()
+        return render_template("index.html", cards=cards, totals=totals, alerts=alerts)
 
     @app.route("/clients")
     def clients():
