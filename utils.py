@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Dict, Tuple, List
-from sqlalchemy import func, and_
+from types import SimpleNamespace
+from sqlalchemy import func
 from models import db, Client, Product, Variant, Movement, Inventory, ReorderRule
 
 
@@ -168,54 +169,6 @@ def _latest_equipment_snapshot(client_id: int) -> Dict[str, int]:
 
 
 # --------- agrégations pour l'accueil & la fiche client ----------
-def _open_qty_cup_keg(client_id: int) -> Tuple[int, int]:
-    """
-    Retourne (cup_qty_in_play, keg_qty_in_play) avec OUT - (IN+DEFECT+FULL),
-    cup = ecocup/gobelet (hors maintenance), keg = tout le reste hors matériel seul.
-    """
-    rows = (
-        db.session.query(
-            Movement.qty,
-            Movement.type,
-            Product.name,
-        )
-        .join(Variant, Movement.variant_id == Variant.id)
-        .join(Product, Variant.product_id == Product.id)
-        .filter(Movement.client_id == client_id)
-        .all()
-    )
-    cup = 0
-    keg = 0
-
-    def is_cup(name: str) -> bool:
-        if not name:
-            return False
-        n = name.lower()
-        if any(w in n for w in ["lavage", "wash", "clean", "perdu", "perte"]):
-            return False
-        return ("ecocup" in n) or ("eco cup" in n) or ("gobelet" in n)
-
-    def is_equipment_only(name: str) -> bool:
-        if not name:
-            return False
-        n = name.lower()
-        return (("matériel" in n or "materiel" in n) and "seul" in n)
-
-    for qty, mtype, pname in rows:
-        if not qty:
-            continue
-        s = 1 if mtype == "OUT" else (-1 if mtype in ("IN", "DEFECT", "FULL") else 0)
-        if s == 0:
-            continue
-        if is_equipment_only(pname):
-            continue
-        if is_cup(pname):
-            cup += s * int(qty)
-        else:
-            keg += s * int(qty)
-    return (cup, keg)
-
-
 def _beer_and_liters_out(client_id: int) -> Tuple[float, float]:
     """
     Sommes "bière €" (OUT uniquement, unit_price_ttc * qty) et "litres sortis cumulé"
@@ -336,13 +289,15 @@ def get_stock_items():
     return [(v, p, inv_qty, min_qty) for (v, p, inv_qty, min_qty) in q.all()]
 
 
-def compute_reorder_alerts() -> Dict[int, Dict]:
+def compute_reorder_alerts() -> List[SimpleNamespace]:
     """
-    Renvoie un dict {variant_id: {"need": int, "inv": int, "min": int, "product": str, "size_l": int}}
-    pour les variantes où inv < min.
+    Renvoie une LISTE d’objets avec les champs attendus par le macro d’alertes :
+      - product (obj Product)
+      - variant (obj Variant)
+      - inv (int), min (int), need (int)
     """
     rows = get_stock_items()
-    alerts = {}
+    alerts: List[SimpleNamespace] = []
     for v, p, inv_qty, min_qty in rows:
         try:
             inv_i = int(inv_qty or 0)
@@ -350,11 +305,11 @@ def compute_reorder_alerts() -> Dict[int, Dict]:
         except Exception:
             inv_i, min_i = 0, 0
         if inv_i < min_i:
-            alerts[v.id] = {
-                "need": max(0, min_i - inv_i),
-                "inv": inv_i,
-                "min": min_i,
-                "product": p.name if p else "Produit",
-                "size_l": v.size_l,
-            }
+            alerts.append(SimpleNamespace(
+                product=p,
+                variant=v,
+                inv=inv_i,
+                min=min_i,
+                need=max(0, min_i - inv_i),
+            ))
     return alerts
