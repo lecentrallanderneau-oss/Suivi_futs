@@ -165,7 +165,9 @@ def create_app():
         return query.filter(~and_(is_cup, is_maintenance))
 
     # ----------------- Pages -----------------
-    @app.route("/")
+    # (laisse une ligne vide au-dessus)
+
+@app.route("/")
 def index():
     """
     Accueil : affiche
@@ -173,43 +175,16 @@ def index():
       - les 12 derniers mouvements (toutes dates)
       - la liste des clients
     """
-    # Fenêtre locale Europe/Paris (évite le décalage UTC le soir)
+    from datetime import datetime, time, timedelta, timezone  # import local safe
+    from zoneinfo import ZoneInfo
+
     tz = ZoneInfo("Europe/Paris")
     now_paris = datetime.now(tz)
     start_paris = datetime.combine(now_paris.date(), time(0, 0, 0), tzinfo=tz)
     end_paris = start_paris + timedelta(days=1) - timedelta(microseconds=1)
 
-    # Si created_at est aware (tz): on convertit la fenêtre en UTC pour comparer
-    start_utc = start_paris.astimezone(timezone.utc)
-    end_utc = end_paris.astimezone(timezone.utc)
+    # Si votre colonne created_at_
 
-    # Modèle supposé : Movement(created_at, movement_type in {'delivery','return'})
-    # "Aujourd'hui" (Europe/Paris)
-    day_movements = (
-        Movement.query
-        .filter(Movement.created_at >= start_utc, Movement.created_at <= end_utc)
-        .order_by(Movement.created_at.desc())
-        .limit(20)
-        .all()
-    )
-
-    # Fil récent toutes dates (mix livraison + reprise)
-    recent_movements = (
-        Movement.query
-        .order_by(Movement.created_at.desc())
-        .limit(12)
-        .all()
-    )
-
-    # Clients pour les tuiles de l’accueil
-    clients = Client.query.order_by(Client.name.asc()).all()
-
-    return render_template(
-        "index.html",
-        clients=clients,
-        day_movements=day_movements,
-        recent_movements=recent_movements,
-    )
 
     @app.route("/clients")
     def clients():
