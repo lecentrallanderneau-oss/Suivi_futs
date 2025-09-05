@@ -1,6 +1,5 @@
 # app.py — WSGI target: gunicorn app:app
 import os
-import re
 from datetime import datetime, date, time
 from types import SimpleNamespace
 
@@ -189,17 +188,16 @@ def create_app():
 
         return render_template(
             "client_detail.html",
-            client=c,
-            c=c,  # compat éventuelle
+            client=c, c=c,  # on fournit les deux pour compat avec anciens templates
             view=view,
             movements=movements,
             beer_billed_cum=view.get("beer_eur", 0.0),
             deposit_in_play=view.get("deposit_eur", 0.0),
             equipment_totals=view.get("equipment", {}),
             liters_out_cum=view.get("liters_out_cum", 0.0),
-            litres_out_cum=view.get("liters_out_cum", 0.0),
+            litres_out_cum=view.get("liters_out_cum", 0.0),  # alias FR
 
-            # Nouvelles variables séparant consignes
+            # Nouvelles variables
             deposit_cup_eur=dep_cup_eur,
             deposit_keg_eur=dep_keg_eur,
             cup_qty_in_play=cup_qty,
@@ -243,7 +241,6 @@ def create_app():
             return render_template(
                 "client_confirm_delete.html",
                 client=c,
-                c=c,
                 mv_count=mv_count,
                 open_total=open_total,
                 open_details=open_details,
@@ -260,8 +257,12 @@ def create_app():
               <div class="card-header bg-danger text-white">⚠️ Suppression définitive du client</div>
               <div class="card-body">
                 <h5 class="card-title mb-3">{{ client.name }}</h5>
-                <p class="mb-2">Cette action est <strong>irréversible</strong>.</p>
-
+                <p class="mb-2">Cette action est <strong>irréversible</strong>. Elle va :</p>
+                <ul>
+                  <li>Supprimer <strong>tous les mouvements</strong> liés à ce client ({{ mv_count }} enregistrements).</li>
+                  <li>Rétablir l’inventaire bar correspondant aux mouvements <em>Livraison (OUT)</em> et <em>Appro (FULL)</em>.</li>
+                  <li>Supprimer la fiche client.</li>
+                </ul>
                 {% if open_total and open_total > 0 %}
                   <div class="alert alert-warning">
                     Il reste <strong>{{ open_total }}</strong> article(s) en jeu chez ce client :
@@ -272,27 +273,26 @@ def create_app():
                     </ul>
                   </div>
                 {% endif %}
-
                 {% if deposit_in_play and (deposit_in_play | float | abs) > 0.01 %}
                   <div class="alert alert-info">
                     Consignes/depôts estimés en jeu : <strong>{{ deposit_in_play | eur }}</strong>.
                   </div>
                 {% endif %}
-
                 {% if equipment_in_play and equipment_in_play > 0 %}
                   <div class="alert alert-secondary">
                     Matériel en jeu : <strong>{{ equipment_in_play }}</strong>.
                   </div>
                 {% endif %}
-
                 {% if blocked %}
-                  <div class="alert alert-danger">Suppression <strong>bloquée</strong>.</div>
+                  <div class="alert alert-danger">
+                    Suppression <strong>bloquée</strong> : le client n’est pas à zéro partout.
+                  </div>
                   <a class="btn btn-outline-secondary" href="{{ url_for('client_detail', client_id=client.id) }}">Retour à la fiche</a>
                 {% else %}
                   <form method="post" action="{{ url_for('client_delete', client_id=client.id) }}" class="d-flex gap-2 mt-3">
                     <a class="btn btn-outline-secondary" href="{{ url_for('client_detail', client_id=client.id) }}">Annuler</a>
                     <button class="btn btn-danger" type="submit"
-                            onclick="return confirm('Confirmer la suppression définitive ?');">
+                            onclick="return confirm('Confirmer la suppression définitive ? Action irréversible.');">
                       Supprimer définitivement
                     </button>
                   </form>
@@ -304,7 +304,6 @@ def create_app():
             return render_template_string(
                 html,
                 client=c,
-                c=c,
                 mv_count=mv_count,
                 open_total=open_total,
                 open_details=open_details,
@@ -497,13 +496,20 @@ def create_app():
                         clients=Client.query.order_by(Client.name.asc()).all(),
                         prefill_client=prefill_client,
                         rows=[],
+                        selected=[],
                         wiz=wiz,
                     )
                 return redirect(url_for("movement_wizard", step=2))
 
             clients = Client.query.order_by(Client.name.asc()).all()
             prefill_client = Client.query.get(wiz.get("client_id")) if wiz.get("client_id") else None
-            return render_template("movement_wizard.html", step=1, clients=clients, prefill_client=prefill_client, rows=[], wiz=wiz)
+            return render_template("movement_wizard.html",
+                                   step=1,
+                                   clients=clients,
+                                   prefill_client=prefill_client,
+                                   rows=[],
+                                   selected=[],
+                                   wiz=wiz)
 
         # --- ÉTAPE 2 : choix variantes ---
         if step == 2:
@@ -519,7 +525,6 @@ def create_app():
                 session.modified = True
                 return redirect(url_for("movement_wizard", step=3))
 
-            clients = Client.query.order_by(Client.name.asc()).all()
             base_q = (
                 db.session.query(Variant, Product)
                 .join(Product, Variant.product_id == Product.id)
@@ -546,8 +551,15 @@ def create_app():
                     base_q = base_q.filter(Variant.id.in_(final_ids))
 
             rows2 = base_q.all()
+            clients = Client.query.order_by(Client.name.asc()).all()
             prefill_client = Client.query.get(wiz.get("client_id")) if wiz.get("client_id") else None
-            return render_template("movement_wizard.html", step=2, clients=clients, rows=rows2, wiz=wiz, prefill_client=prefill_client)
+            return render_template("movement_wizard.html",
+                                   step=2,
+                                   clients=clients,
+                                   prefill_client=prefill_client,
+                                   rows=rows2,
+                                   selected=[],
+                                   wiz=wiz)
 
         # --- ÉTAPE 3 : saut vers 4 ---
         if step == 3:
@@ -556,12 +568,10 @@ def create_app():
         # --- ÉTAPE 4 : saisie + enregistrement ---
         if step == 4:
             if request.method == "POST":
-                # Obligatoires
                 if (wiz.get("client_id") is None) or (wiz.get("type") is None):
                     flash("Informations incomplètes.", "warning")
                     return redirect(url_for("movement_wizard", step=1))
 
-                # Date
                 if wiz.get("date"):
                     try:
                         y, m_, d2 = [int(x) for x in wiz["date"].split("-")]
@@ -571,110 +581,17 @@ def create_app():
                 else:
                     created_at = U.now_utc()
 
-                # 1) Quels variants traiter ?
-                variant_ids = []
-                if "variant_id" in request.form or "variant_ids" in request.form:
-                    variant_ids = request.form.getlist("variant_id") or request.form.getlist("variant_ids")
-                if not variant_ids and "wiz" in session and session["wiz"].get("variant_ids"):
-                    variant_ids = [str(v) for v in session["wiz"]["variant_ids"]]
-                if not variant_ids:
-                    # extra fallback: détecter dans les clés qty_<id> ou qty[<id>]
-                    for k in request.form.keys():
-                        m = re.match(r"qty_(\d+)$", k) or re.match(r"qty\[(\d+)\]$", k)
-                        if m:
-                            variant_ids.append(m.group(1))
-
-                # caster en int
-                variant_ids = [int(v) for v in variant_ids if str(v).isdigit()]
-                if not variant_ids:
-                    flash("Sélectionne au moins un produit.", "warning")
-                    return redirect(url_for("movement_wizard", step=2))
-
-                # 2) Construire des maps qty/price/deposit par id (multiformats)
-                list_qtys   = request.form.getlist("qty") or request.form.getlist("qty[]") or []
-                list_prices = request.form.getlist("unit_price_ttc") or request.form.getlist("unit_price_ttc[]") or []
-                list_deps   = (
-                    request.form.getlist("deposit_per_keg") or
-                    request.form.getlist("deposit_per_keg[]") or
-                    request.form.getlist("deposit") or
-                    request.form.getlist("consigne") or
-                    []
-                )
-
-                qty_map, price_map, dep_map = {}, {}, {}
-
-                # a) clés ciblées qty_<id> / price_<id> / deposit_<id>
-                for vid in variant_ids:
-                    # qty
-                    if f"qty_{vid}" in request.form:
-                        try:
-                            qty_map[vid] = int((request.form.get(f"qty_{vid}") or "0").strip() or 0)
-                        except Exception:
-                            qty_map[vid] = 0
-                    elif f"qty[{vid}]" in request.form:
-                        try:
-                            qty_map[vid] = int((request.form.get(f"qty[{vid}]") or "0").strip() or 0)
-                        except Exception:
-                            qty_map[vid] = 0
-
-                    # price
-                    for key in (f"unit_price_ttc_{vid}", f"unit_price_ttc[{vid}]"):
-                        if key in request.form:
-                            raw = request.form.get(key)
-                            try:
-                                price_map[vid] = float(str(raw).replace(",", ".")) if raw not in ("", None) else None
-                            except Exception:
-                                price_map[vid] = None
-
-                    # deposit aliases
-                    for key in (f"deposit_per_keg_{vid}", f"deposit_per_keg[{vid}]",
-                                f"deposit_{vid}", f"deposit[{vid}]",
-                                f"consigne_{vid}", f"consigne[{vid}]"):
-                        if key in request.form:
-                            raw = request.form.get(key)
-                            try:
-                                dep_map[vid] = float(str(raw).replace(",", ".")) if raw not in ("", None) else None
-                            except Exception:
-                                dep_map[vid] = None
-
-                # b) si des listes “parallèles” existent, on les associe par index
-                #    (ordre des lignes conservé par le template)
-                vid_list_for_index = request.form.getlist("variant_id") or request.form.getlist("variant_ids") or []
-                if not vid_list_for_index:
-                    # tenter via les noms type vid_<id>=on
-                    vid_list_for_index = [k.split("_", 1)[1] for k in request.form.keys() if k.startswith("vid_")]
-                try:
-                    vid_list_for_index = [int(v) for v in vid_list_for_index if str(v).isdigit()]
-                except Exception:
-                    vid_list_for_index = []
-
-                for idx, vid in enumerate(vid_list_for_index):
-                    if vid not in variant_ids:
-                        continue
-                    if vid not in qty_map and idx < len(list_qtys):
-                        try:
-                            qty_map[vid] = int((list_qtys[idx] or "0").strip() or 0)
-                        except Exception:
-                            qty_map[vid] = 0
-                    if vid not in price_map and idx < len(list_prices):
-                        try:
-                            raw = list_prices[idx]
-                            price_map[vid] = float(str(raw).replace(",", ".")) if str(raw).strip() != "" else None
-                        except Exception:
-                            price_map[vid] = None
-                    if vid not in dep_map and idx < len(list_deps):
-                        try:
-                            raw = list_deps[idx]
-                            dep_map[vid] = float(str(raw).replace(",", ".")) if str(raw).strip() != "" else None
-                        except Exception:
-                            dep_map[vid] = None
-
-                # Notes + encodage matériel
+                variant_ids = request.form.getlist("variant_id")
+                qtys = request.form.getlist("qty")
+                unit_prices = request.form.getlist("unit_price_ttc")
+                deposits = request.form.getlist("deposit_per_keg")
                 notes = request.form.get("notes") or None
-                t  = request.form.get("eq_tireuse",  type=int)
-                c2 = request.form.get("eq_co2",      type=int)
-                cpt= request.form.get("eq_comptoir", type=int)
-                ton= request.form.get("eq_tonnelle", type=int)
+
+                # matériel encodé dans notes
+                t = request.form.get("eq_tireuse", type=int)
+                c2 = request.form.get("eq_co2", type=int)
+                cpt = request.form.get("eq_comptoir", type=int)
+                ton = request.form.get("eq_tonnelle", type=int)
                 equip_parts = []
                 if t:   equip_parts.append(f"tireuse={t}")
                 if c2:  equip_parts.append(f"co2={c2}")
@@ -684,42 +601,62 @@ def create_app():
 
                 client_id2 = int(wiz["client_id"])
                 mtype = wiz["type"]
+
                 violations = []
                 open_map = _open_qty_by_variant(client_id2) if mtype == "IN" else {}
 
-                # Insertion robuste
-                for vid in variant_ids:
-                    v = Variant.query.get(vid)
+                for i, vid in enumerate(variant_ids):
+                    try:
+                        vid_int = int(vid)
+                    except Exception:
+                        continue
+
+                    try:
+                        qty_int = int(qtys[i])
+                    except Exception:
+                        qty_int = 0
+
+                    up = None
+                    if i < len(unit_prices) and unit_prices[i] not in ("", None):
+                        try:
+                            up = float(unit_prices[i].replace(",", "."))
+                        except Exception:
+                            up = None
+
+                    dep = None
+                    if i < len(deposits) and deposits[i] not in ("", None):
+                        try:
+                            dep = float(deposits[i].replace(",", "."))
+                        except Exception:
+                            dep = None
+
+                    v = Variant.query.get(vid_int)
                     if not v:
                         continue
 
-                    # valeurs
-                    qty_int = int(qty_map.get(vid, 0) or 0)
-                    up = price_map.get(vid, None)
-                    dep = dep_map.get(vid, None)
-
                     pname = (v.product.name if v and v.product else "") or ""
                     is_equipment_only = ("matériel" in pname.lower() or "materiel" in pname.lower()) and ("seul" in pname.lower())
-
                     if is_equipment_only:
                         qty_int = 0
-                        up, dep = 0.0, 0.0
+                        up = 0.0
+                        dep = 0.0
                     else:
                         if up is None and (v.price_ttc is not None):
                             up = v.price_ttc
                         if dep is None:
+                            # << corrige l’erreur précédente >>
                             dep = U.default_deposit_for_product(v.product)
 
                         if mtype == "IN":
-                            open_q = int(open_map.get(vid, 0))
-                            if qty_int > open_q:
+                            open_q = int(open_map.get(vid_int, 0))
+                            if open_q <= 0 or qty_int > open_q:
                                 label = f"{v.product.name} — {v.size_l} L" if v.size_l else f"{v.product.name}"
                                 violations.append((label, open_q))
                                 continue
 
                     mv = Movement(
                         client_id=client_id2,
-                        variant_id=vid,
+                        variant_id=vid_int,
                         type=mtype,
                         qty=qty_int,
                         unit_price_ttc=up,
@@ -729,12 +666,11 @@ def create_app():
                     )
                     db.session.add(mv)
 
-                    if not is_equipment_only:
-                        inv = U.get_or_create_inventory(vid)
-                        if mtype == "OUT":
-                            inv.qty = (inv.qty or 0) - qty_int
-                        elif mtype == "FULL":
-                            inv.qty = (inv.qty or 0) + qty_int
+                    inv = U.get_or_create_inventory(vid_int)
+                    if mtype == "OUT":
+                        inv.qty = (inv.qty or 0) - qty_int
+                    elif mtype == "FULL":
+                        inv.qty = (inv.qty or 0) + qty_int
 
                 if violations:
                     text = "Certains retours dépassent l’enjeu autorisé : " + ", ".join(
@@ -748,14 +684,33 @@ def create_app():
                 session.pop("wiz", None)
                 return redirect(url_for("client_detail", client_id=client_id2))
 
-            # GET step 4 : affichage
+            # GET step=4 : on prépare TOUJOURS toutes les variables attendues par le template
             selected = []
-            for vid in session.get("wiz", {}).get("variant_ids", []):
+            rows_for_template = []
+            for vid in wiz.get("variant_ids", []):
                 v = Variant.query.get(vid)
                 if v:
                     selected.append((v, v.product))
-            prefill_client = Client.query.get(session.get("wiz", {}).get("client_id")) if session.get("wiz", {}).get("client_id") else None
-            return render_template("movement_wizard.html", step=4, wiz=session.get("wiz", {}), selected=selected, prefill_client=prefill_client)
+                    rows_for_template.append((v, v.product))
+
+            clients = Client.query.order_by(Client.name.asc()).all()
+            prefill_client = Client.query.get(wiz.get("client_id")) if wiz.get("client_id") else None
+
+            # Si rien n’a été sélectionné, on renvoie à l’étape 2 proprement
+            if not selected:
+                flash("Aucun produit sélectionné. Reviens à l’étape 2 pour choisir des références.", "info")
+                return redirect(url_for("movement_wizard", step=2))
+
+            return render_template("movement_wizard.html",
+                                   step=4,
+                                   clients=clients,
+                                   prefill_client=prefill_client,
+                                   rows=rows_for_template,    # fourni au cas où le template ancien l’utilise
+                                   selected=selected,         # format (Variant, Product)
+                                   wiz=wiz)
+
+        # fallback sécurité
+        return redirect(url_for("movement_wizard", step=1))
 
     # ---- Suppression mouvement ----
     @app.route("/movement/<int:movement_id>/confirm-delete", methods=["GET"])
