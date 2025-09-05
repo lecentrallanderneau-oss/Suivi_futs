@@ -1,69 +1,19 @@
-{% extends "base.html" %}
-{% import "_macros.html" as ui %}
+@app.route("/")
+def index():
+    """
+    Accueil : affiche
+      - les mouvements "d'aujourd'hui" en Europe/Paris (livraisons + reprises)
+      - les 12 derniers mouvements (toutes dates)
+      - la liste des clients
+    """
+    # Fenêtre locale Europe/Paris (évite le décalage UTC le soir)
+    tz = ZoneInfo("Europe/Paris")
+    now_paris = datetime.now(tz)
+    start_paris = datetime.combine(now_paris.date(), time(0, 0, 0), tzinfo=tz)
+    end_paris = start_paris + timedelta(days=1) - timedelta(microseconds=1)
 
-{% block content %}
-<div class="header-line">
-  <h1>Stock par client</h1>
-  <a class="btn btn-primary" href="{{ url_for('movement_wizard', step=1) }}">+ Saisie</a>
-</div>
+    # Si created_at est aware (tz): on convertit la fenêtre en UTC pour comparer
+    start_utc = start_paris.astimezone(timezone.utc)
+    end_utc = end_paris.astimezone(timezone.utc)
 
-{{ ui.alerts_list(alerts) }}
-
-<div class="card">
-  <div class="card-body">
-    <div class="list-rows">
-      {% for c in cards %}
-      {% set cid = c.get('id', c.get('client_id')) %}
-      {% set cname = c.get('name') %}
-      <div class="list-row">
-        <div class="col-name">
-          <a class="client-link" href="{{ url_for('client_detail', client_id=cid) }}">{{ cname }}</a>
-        </div>
-
-        <div class="col-pills">
-          <span class="pill pill-muted">Fûts en jeu: {{ c.get('kegs_qty', 0) }}</span>
-          <span class="pill">Bière facturée: {{ ui.eur(c.get('billed_beer_eur', 0)) }}</span>
-          <span class="pill pill-cup">Consigne gobelets: {{ ui.eur(c.get('deposits_cup_eur', 0)) }}</span>
-          <span class="pill">Consignes fûts: {{ ui.eur(c.get('deposits_keg_eur', 0)) }}</span>
-        </div>
-
-        <div class="col-eq">
-          {{ ui.equipment_badges(c.get('equipment', {})) }}
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </div>
-</div>
-
-{# --- Bandeau Totaux --- #}
-<div class="card totals-card">
-  <div class="card-header">Totaux</div>
-  <div class="card-body">
-    <div class="totals-grid">
-      <div class="totals-item">
-        <div class="totals-label">Bière facturée</div>
-        <div class="totals-value">{{ ui.eur(totals.billed_beer_eur) }}</div>
-      </div>
-      <div class="totals-item">
-        <div class="totals-label">Consigne gobelets</div>
-        <div class="totals-value">{{ ui.eur(totals.deposits_cup_eur) }}</div>
-      </div>
-      <div class="totals-item">
-        <div class="totals-label">Consignes fûts</div>
-        <div class="totals-value">{{ ui.eur(totals.deposits_keg_eur) }}</div>
-      </div>
-      <div class="totals-item totals-sum">
-        <div class="totals-label">Total général</div>
-        <div class="totals-value">
-          {{ ui.eur(
-            (totals.billed_beer_eur or 0)
-            + (totals.deposits_cup_eur or 0)
-            + (totals.deposits_keg_eur or 0)
-          ) }}
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-{% endblock %}
+    # Modèle supposé : Movement(created_at, movement_typ
