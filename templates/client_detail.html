@@ -1,50 +1,115 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
-  <h1 class="h4 mb-0">Fiche client</h1>
+  <h1 class="h4 mb-0">Fiche client — {{ client.name }}</h1>
   <a href="{{ url_for('clients') }}" class="btn btn-outline-secondary btn-sm">← Retour</a>
 </div>
 
-<div class="card mb-3">
-  <div class="card-body">
-    <h2 class="h5 mb-1">{{ client.name }}</h2>
-    <div class="text-muted small">ID : {{ client.id }}</div>
-  </div>
-</div>
-
-<!-- Placeholders : à remplir plus tard quand on branchera les mouvements/matériel -->
 <div class="row g-3">
-  <div class="col-lg-6">
+  <div class="col-lg-5">
     <div class="card h-100">
-      <div class="card-header">Historique des mouvements</div>
+      <div class="card-header">Saisir un mouvement</div>
       <div class="card-body">
-        {% if history and history|length %}
-          <ul class="list-group list-group-flush">
-            {% for item in history %}
-              <li class="list-group-item">{{ item }}</li>
-            {% endfor %}
-          </ul>
-        {% else %}
-          <p class="text-muted mb-0">Aucun mouvement enregistré pour le moment.</p>
-        {% endif %}
+        <form method="post" class="row g-2">
+          <div class="col-12">
+            <label class="form-label">Produit</label>
+            <select name="product_id" class="form-select" required>
+              <option value="" disabled selected>Choisir…</option>
+              {% for p in products %}
+                <option value="{{ p.id }}">{{ p.name }} — {{ p.volume_l }}L</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Date</label>
+            <input type="date" name="date" class="form-control" value="{{ (now() if false else '') }}">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Livrés</label>
+            <input type="number" min="0" step="1" name="qty_out" class="form-control" value="0">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Repris</label>
+            <input type="number" min="0" step="1" name="qty_in" class="form-control" value="0">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Défectueux</label>
+            <input type="number" min="0" step="1" name="qty_defect" class="form-control" value="0">
+          </div>
+          <div class="col-12">
+            <label class="form-label">Note</label>
+            <input type="text" name="note" class="form-control" placeholder="Ex: reprise fête, fût cabossé…">
+          </div>
+          <div class="col-12 mt-2">
+            <button class="btn btn-primary">Enregistrer</button>
+          </div>
+          <div class="col-12 text-muted small mt-2">
+            Consigne: 30 € × (Livrés − Repris − Défectueux)
+          </div>
+        </form>
       </div>
     </div>
   </div>
-  <div class="col-lg-6">
-    <div class="card h-100">
-      <div class="card-header">Matériel prêté</div>
+
+  <div class="col-lg-7">
+    <div class="card mb-3">
+      <div class="card-header">Synthèse consignes</div>
       <div class="card-body">
-        {% if equipment and equipment|length %}
-          <ul class="list-group list-group-flush">
-            {% for it in equipment %}
-              <li class="list-group-item">{{ it }}</li>
-            {% endfor %}
-          </ul>
-        {% else %}
-          <p class="text-muted mb-0">Aucun matériel en cours de prêt.</p>
-        {% endif %}
+        <div class="row text-center">
+          <div class="col">
+            <div class="h5 mb-0">{{ totals.out_qty }}</div>
+            <div class="text-muted small">Livrés</div>
+          </div>
+          <div class="col">
+            <div class="h5 mb-0">{{ totals.in_qty }}</div>
+            <div class="text-muted small">Repris</div>
+          </div>
+          <div class="col">
+            <div class="h5 mb-0">{{ totals.defect_qty }}</div>
+            <div class="text-muted small">Défectueux</div>
+          </div>
+          <div class="col">
+            <div class="h5 mb-0">{{ totals.deposit_cents|eur }}</div>
+            <div class="text-muted small">Consignes en cours</div>
+          </div>
+        </div>
       </div>
     </div>
+
+    <div class="card">
+      <div class="card-header">Historique</div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-sm mb-0 align-middle">
+            <thead class="table-light">
+              <tr>
+                <th>Date</th>
+                <th>Produit</th>
+                <th class="text-center">Livrés</th>
+                <th class="text-center">Repris</th>
+                <th class="text-center">Défect.</th>
+                <th>Note</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for m in moves %}
+              <tr>
+                <td>{{ m.date.strftime('%d/%m/%Y') }}</td>
+                <td>{{ m.product.name }} — {{ m.product.volume_l }}L</td>
+                <td class="text-center">{{ m.qty_out }}</td>
+                <td class="text-center">{{ m.qty_in }}</td>
+                <td class="text-center">{{ m.qty_defect }}</td>
+                <td>{{ m.note }}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="6" class="text-center text-muted py-4">Aucun mouvement.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
 {% endblock %}
