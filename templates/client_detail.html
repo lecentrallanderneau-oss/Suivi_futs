@@ -1,115 +1,144 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
-  <h1 class="h4 mb-0">Fiche client — {{ client.name }}</h1>
-  <a href="{{ url_for('clients') }}" class="btn btn-outline-secondary btn-sm">← Retour</a>
+  <h1 class="h3 m-0">Fiche client — {{ client.name }}</h1>
+  <a class="btn btn-outline-secondary" href="{{ url_for('clients') }}">← Retour</a>
 </div>
 
 <div class="row g-3">
+  <!-- Formulaire de saisie -->
   <div class="col-lg-5">
-    <div class="card h-100">
-      <div class="card-header">Saisir un mouvement</div>
+    <div class="card">
+      <div class="card-header">Nouvelle livraison / reprise</div>
       <div class="card-body">
-        <form method="post" class="row g-2">
-          <div class="col-12">
-            <label class="form-label">Produit</label>
+        <form method="post" action="{{ url_for('add_movement', client_id=client.id) }}">
+          <div class="mb-3">
+            <label class="form-label">Date</label>
+            <input type="date" name="date" class="form-control" value="{{ (now() if now else cycler).undefined if false else (namespace(d=[]) ).d | default((()) ) }}" hidden>
+            <input type="date" name="date" class="form-control" value="{{ (range(0,1)|length) and (caller|default('') ) }}" hidden>
+            <input type="date" name="date" class="form-control" value="{{ (namespace().x if false else None) }}" hidden>
+            <!-- plus simple : -->
+            <input type="date" name="date" class="form-control" value="{{ (client.movements|last).date.strftime('%Y-%m-%d') if client.movements|length>0 else (namespace().today if false else '') }}" >
+            <small class="text-muted">Laisse vide pour la date du jour.</small>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Produit (nom + volume)</label>
             <select name="product_id" class="form-select" required>
-              <option value="" disabled selected>Choisir…</option>
-              {% for p in products %}
-                <option value="{{ p.id }}">{{ p.name }} — {{ p.volume_l }}L</option>
+              <option value="" selected disabled>Choisir un produit…</option>
+              {% set seen = [] %}
+              {% for p in client.query.session.query(p.__class__).bind.mapper.class_manager  %}
+              {% endfor %}
+              {% for p in client.query.session.query(type(client)).first() %}
+              {% endfor %}
+              {% for p in client.query.session.query(client.__class__).first() %}
+              {% endfor %}
+              {% for p in client.query.session.bind %}
+              {% endfor %}
+              {% for p in client.query.session.query(client.__class__) %}
+              {% endfor %}
+              {# plus simplement : on va requêter via la relation globalement #}
+              {% for p in client.query.session.query(Product).filter_by(is_active=True).order_by(Product.name.asc(), Product.volume_l.asc()).all() %}
+                <option value="{{ p.id }}">{{ p.name }} — {{ p.volume_l }} L ({{ p.price_cents|eur }})</option>
               {% endfor %}
             </select>
           </div>
-          <div class="col-6">
-            <label class="form-label">Date</label>
-            <input type="date" name="date" class="form-control" value="{{ (now() if false else '') }}">
+
+          <div class="row g-2">
+            <div class="col-6">
+              <label class="form-label">Livrés (fûts pleins)</label>
+              <input type="number" min="0" name="qty_in" class="form-control" value="0">
+            </div>
+            <div class="col-6">
+              <label class="form-label">Repris (vides)</label>
+              <input type="number" min="0" name="qty_out" class="form-control" value="0">
+            </div>
           </div>
-          <div class="col-4">
-            <label class="form-label">Livrés</label>
-            <input type="number" min="0" step="1" name="qty_out" class="form-control" value="0">
+
+          <div class="form-check my-3">
+            <input class="form-check-input" type="checkbox" value="1" name="defective" id="defective">
+            <label class="form-check-label" for="defective">
+              Reprise défectueuse (déconsignée, non facturée)
+            </label>
           </div>
-          <div class="col-4">
-            <label class="form-label">Repris</label>
-            <input type="number" min="0" step="1" name="qty_in" class="form-control" value="0">
-          </div>
-          <div class="col-4">
-            <label class="form-label">Défectueux</label>
-            <input type="number" min="0" step="1" name="qty_defect" class="form-control" value="0">
-          </div>
-          <div class="col-12">
-            <label class="form-label">Note</label>
-            <input type="text" name="note" class="form-control" placeholder="Ex: reprise fête, fût cabossé…">
-          </div>
-          <div class="col-12 mt-2">
-            <button class="btn btn-primary">Enregistrer</button>
-          </div>
-          <div class="col-12 text-muted small mt-2">
-            Consigne: 30 € × (Livrés − Repris − Défectueux)
-          </div>
+
+          <button class="btn btn-primary w-100" type="submit">Enregistrer</button>
         </form>
       </div>
     </div>
   </div>
 
+  <!-- Historique + synthèse -->
   <div class="col-lg-7">
     <div class="card mb-3">
       <div class="card-header">Synthèse consignes</div>
       <div class="card-body">
-        <div class="row text-center">
-          <div class="col">
-            <div class="h5 mb-0">{{ totals.out_qty }}</div>
-            <div class="text-muted small">Livrés</div>
+        {% set delivered = 0 %}
+        {% set returned = 0 %}
+        {% set defect = 0 %}
+        {% for m in client.movements %}
+          {% set delivered = delivered + (m.qty_in or 0) %}
+          {% set returned  = returned  + (m.qty_out or 0) %}
+          {% if m.defective %}
+            {% set defect = defect + (m.qty_out or 0) %}
+          {% endif %}
+        {% endfor %}
+        {% set deposit_each = 3000 %} {# 30 € en centimes #}
+        {% set deposit_total = (delivered - returned) * deposit_each %}
+        <div class="row">
+          <div class="col-sm-6">
+            <div class="mb-1"><strong>Fûts livrés :</strong> {{ delivered }}</div>
+            <div class="mb-1"><strong>Fûts repris :</strong> {{ returned }}</div>
+            <div class="mb-1"><strong>Reprises défectueuses :</strong> {{ defect }}</div>
           </div>
-          <div class="col">
-            <div class="h5 mb-0">{{ totals.in_qty }}</div>
-            <div class="text-muted small">Repris</div>
-          </div>
-          <div class="col">
-            <div class="h5 mb-0">{{ totals.defect_qty }}</div>
-            <div class="text-muted small">Défectueux</div>
-          </div>
-          <div class="col">
-            <div class="h5 mb-0">{{ totals.deposit_cents|eur }}</div>
-            <div class="text-muted small">Consignes en cours</div>
+          <div class="col-sm-6">
+            <div class="mb-1"><strong>Consigne unitaire :</strong> {{ deposit_each|eur }}</div>
+            <div class="mb-1"><strong>Consigne théorique :</strong> {{ deposit_total|eur }}</div>
           </div>
         </div>
+        <small class="text-muted">La consigne est calculée à +30€ par fût livré et -30€ par fût repris (défectueux inclus dans les reprises).</small>
       </div>
     </div>
 
     <div class="card">
-      <div class="card-header">Historique</div>
-      <div class="card-body p-0">
+      <div class="card-header">Historique des mouvements</div>
+      <div class="card-body">
+        {% if client.movements %}
         <div class="table-responsive">
-          <table class="table table-sm mb-0 align-middle">
-            <thead class="table-light">
+          <table class="table align-middle">
+            <thead>
               <tr>
                 <th>Date</th>
                 <th>Produit</th>
-                <th class="text-center">Livrés</th>
-                <th class="text-center">Repris</th>
-                <th class="text-center">Défect.</th>
-                <th>Note</th>
+                <th class="text-end">Livrés</th>
+                <th class="text-end">Repris</th>
+                <th>Défectueux</th>
               </tr>
             </thead>
             <tbody>
-              {% for m in moves %}
+              {% for m in client.movements|sort(attribute='date', reverse=True) %}
               <tr>
-                <td>{{ m.date.strftime('%d/%m/%Y') }}</td>
-                <td>{{ m.product.name }} — {{ m.product.volume_l }}L</td>
-                <td class="text-center">{{ m.qty_out }}</td>
-                <td class="text-center">{{ m.qty_in }}</td>
-                <td class="text-center">{{ m.qty_defect }}</td>
-                <td>{{ m.note }}</td>
+                <td>{{ m.date.strftime("%d/%m/%Y") }}</td>
+                <td>{{ m.product.name }} — {{ m.product.volume_l }} L</td>
+                <td class="text-end">{{ m.qty_in }}</td>
+                <td class="text-end">{{ m.qty_out }}</td>
+                <td>
+                  {% if m.defective %}
+                    <span class="badge text-bg-warning">Oui</span>
+                  {% else %}
+                    <span class="text-muted">Non</span>
+                  {% endif %}
+                </td>
               </tr>
-              {% else %}
-              <tr><td colspan="6" class="text-center text-muted py-4">Aucun mouvement.</td></tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
+        {% else %}
+          <p class="mb-0 text-muted">Aucun mouvement pour ce client.</p>
+        {% endif %}
       </div>
     </div>
-
   </div>
 </div>
 {% endblock %}
