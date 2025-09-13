@@ -1,27 +1,52 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h1 class="h4">Clients</h1>
-  <form class="d-flex gap-2" method="post" action="{{ url_for('client_new_post') }}">
-    <input class="form-control" name="name" placeholder="Nom du client" required>
-    <input class="form-control" name="city" placeholder="Ville (optionnel)">
-    <button class="btn btn-success">Ajouter</button>
-  </form>
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h1 class="h3 mb-0">Clients</h1>
 </div>
 
-<div class="list-group">
-  {% for c in clients %}
-    <div class="list-group-item d-flex justify-content-between align-items-center">
-      <div>
-        <a href="{{ url_for('client_detail', client_id=c.id) }}"><strong>{{ c.name }}</strong></a>
-        {% if c.city %}<span class="text-muted"> – {{ c.city }}</span>{% endif %}
+<div class="card mb-4">
+  <div class="card-header">Ajouter un client</div>
+  <div class="card-body">
+    <form method="post" action="{{ url_for('clients') }}" class="row g-2">
+      <div class="col-sm-8 col-md-6">
+        <input type="text" name="name" class="form-control" placeholder="Nom du client" required>
       </div>
-      <form method="post" action="{{ url_for('client_delete', client_id=c.id) }}" onsubmit="return confirm('Supprimer ce client ?')">
-        <button class="btn btn-sm btn-outline-danger">Supprimer</button>
-      </form>
+      <div class="col-auto">
+        <button class="btn btn-primary">Ajouter</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Liste des clients</div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th style="width:80px;">ID</th>
+            <th>Nom</th>
+            <th style="width:140px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in clients %}
+          <tr>
+            <td>{{ c.id }}</td>
+            <td>{{ c.name }}</td>
+            <td class="text-end">
+              <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('client_detail', client_id=c.id) }}">
+                Ouvrir
+              </a>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="text-center text-muted py-4">Aucun client.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </div>
-  {% else %}
-    <div class="text-muted">Aucun client pour l'instant.</div>
-  {% endfor %}
+  </div>
 </div>
 {% endblock %}
