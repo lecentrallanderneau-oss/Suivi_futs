@@ -1,49 +1,44 @@
 <!doctype html>
 <html lang="fr">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Suivi Fûts</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  </head>
-  <body class="bg-light">
-    <nav class="navbar navbar-expand-lg bg-white border-bottom mb-3">
-      <div class="container-fluid">
-        <a class="navbar-brand" href="{{ url_for('index') }}">Suivi Fûts</a>
-        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-          <li class="nav-item">
-            <a class="nav-link {% if request.endpoint=='index' %}active{% endif %}" href="{{ url_for('index') }}">Accueil</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link {% if request.endpoint in ['clients','client_detail'] %}active{% endif %}" href="{{ url_for('clients') }}">Clients</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link {% if request.endpoint=='catalog' %}active{% endif %}" href="{{ url_for('catalog') }}">
-              Catalogue
-            </a>
-          </li>
-        </ul>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Livraison & Suivi Fûts</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-lg bg-body-tertiary">
+  <div class="container">
+    <a class="navbar-brand" href="{{ url_for('index') }}">Suivi Fûts</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav"
+            aria-controls="nav" aria-expanded="false" aria-label="Basculer la navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="nav">
+      <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+        <!-- On pointe désormais vers 'index' au lieu de 'clients' -->
+        <li class="nav-item">
+          <a class="nav-link {% if request.endpoint in ['index','client_detail'] %}active{% endif %}"
+             href="{{ url_for('index') }}">Clients</a>
+        </li>
+
+        <!-- Si tu as un catalogue plus tard, adapte l’endpoint ici -->
+        {# <li class="nav-item">
+          <a class="nav-link {% if request.endpoint in ['catalog'] %}active{% endif %}"
+             href="{{ url_for('catalog') }}">Catalogue</a>
+        </li> #}
+      </ul>
+      <div class="d-flex">
+        <!-- Zone d’actions globales si besoin -->
       </div>
-    </nav>
+    </div>
+  </div>
+</nav>
 
-    <main class="container">
-      {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-          <div class="mt-2">
-            {% for cat, msg in messages %}
-            <div class="alert alert-{{ cat }} alert-dismissible fade show" role="alert">
-              {{ msg }}
-              <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>
-            {% endfor %}
-          </div>
-        {% endif %}
-      {% endwith %}
+<div class="container py-4">
+  {% block content %}{% endblock %}
+</div>
 
-      {% block content %}{% endblock %}
-    </main>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-  </body>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
 </html>
