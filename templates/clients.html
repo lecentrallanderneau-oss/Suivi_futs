@@ -1,52 +1,37 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
-  <h1 class="h3 mb-0">Clients</h1>
+  <h1 class="h3 m-0">Clients</h1>
 </div>
 
 <div class="card mb-4">
-  <div class="card-header">Ajouter un client</div>
   <div class="card-body">
-    <form method="post" action="{{ url_for('clients') }}" class="row g-2">
-      <div class="col-sm-8 col-md-6">
-        <input type="text" name="name" class="form-control" placeholder="Nom du client" required>
+    <form class="row g-2" method="post" action="{{ url_for('add_client') }}">
+      <div class="col-md-6">
+        <label class="form-label">Nom du client</label>
+        <input type="text" name="name" class="form-control" placeholder="Ex : Café de la Place" required>
       </div>
-      <div class="col-auto">
-        <button class="btn btn-primary">Ajouter</button>
+      <div class="col-md-3 align-self-end">
+        <button class="btn btn-success w-100" type="submit">Ajouter</button>
       </div>
     </form>
   </div>
 </div>
 
 <div class="card">
-  <div class="card-header">Liste des clients</div>
-  <div class="card-body p-0">
-    <div class="table-responsive">
-      <table class="table table-sm align-middle mb-0">
-        <thead class="table-light">
-          <tr>
-            <th style="width:80px;">ID</th>
-            <th>Nom</th>
-            <th style="width:140px;"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for c in clients %}
-          <tr>
-            <td>{{ c.id }}</td>
-            <td>{{ c.name }}</td>
-            <td class="text-end">
-              <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('client_detail', client_id=c.id) }}">
-                Ouvrir
-              </a>
-            </td>
-          </tr>
-          {% else %}
-          <tr><td colspan="3" class="text-center text-muted py-4">Aucun client.</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
+  <div class="card-body">
+    {% if clients %}
+      <ul class="list-group list-group-flush">
+        {% for c in clients %}
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <span>{{ c.name }}</span>
+          <a class="btn btn-sm btn-primary" href="{{ url_for('client_detail', client_id=c.id) }}">Gérer</a>
+        </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="mb-0 text-muted">Aucun client enregistré.</p>
+    {% endif %}
   </div>
 </div>
 {% endblock %}
