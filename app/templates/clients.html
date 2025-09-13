@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Clients{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="m-0">Clients</h4>
+</div>
+<form class="card p-3 mb-4" method="post">
+    <div class="row g-2">
+        <div class="col-md-5">
+            <label class="form-label">Nom</label>
+            <input class="form-control" name="name" required>
+        </div>
+        <div class="col-md-5">
+            <label class="form-label">Ville (optionnel)</label>
+            <input class="form-control" name="city">
+        </div>
+        <div class="col-md-2 d-flex align-items-end">
+            <button class="btn btn-primary w-100">Ajouter</button>
+        </div>
+    </div>
+</form>
+<ul class="list-group">
+    {% for c in items %}
+    <li class="list-group-item d-flex justify-content-between align-items-center">
+        <span>{{ c.name }}{% if c.city %} — <small class="text-muted">{{ c.city }}</small>{% endif %}</span>
+        <form method="post" action="{{ url_for('main.client_delete', client_id=c.id) }}">
+            <button class="btn btn-sm btn-outline-danger" type="submit">Supprimer</button>
+        </form>
+    </li>
+    {% else %}
+    <li class="list-group-item">Aucun client.</li>
+    {% endfor %}
+</ul>
+{% endblock %}
