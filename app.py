@@ -4,7 +4,10 @@ import os
 from datetime import datetime
 from urllib.parse import urlparse
 
-from flask import Flask, render_template, abort
+from flask import (
+    Flask, render_template, abort,
+    redirect, url_for, request, flash,
+)
 from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__)
@@ -12,15 +15,13 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
 
 # -------------------------------------------------------------------
 # Base de données
-#  - Prod (Render): DATABASE_URL -> forcer le driver psycopg3
+#  - Prod (Render): DATABASE_URL -> psycopg (psycopg3)
 #  - Local: SQLite
 # -------------------------------------------------------------------
 db_url = os.environ.get("DATABASE_URL")
 if db_url:
-    # Render peut fournir "postgres://..."
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
-    # On force psycopg3 (sinon Flask/SQLAlchemy tente psycopg2)
     if db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 else:
@@ -33,35 +34,30 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 db = SQLAlchemy(app)
 
 # -------------------------------------------------------------------
-# Modèles MINIMAUX (structure stable). On ajoute au fur et à mesure.
+# Modèles MINIMAUX
 # -------------------------------------------------------------------
 class Client(db.Model):
     __tablename__ = "clients"
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String, nullable=False)
 
-
 # -------------------------------------------------------------------
 # Filtres & context
 # -------------------------------------------------------------------
 @app.template_filter("eur")
 def eur_filter(cents: int | None) -> str:
-    """Formate des centimes en '12,34 €'."""
     value = (cents or 0) / 100.0
     return f"{value:,.2f} €".replace(",", "X").replace(".", ",").replace("X", " ")
 
 @app.context_processor
 def inject_now():
-    # IMPORTANT : injecter un objet datetime (pas la fonction)
     return {"now": datetime.utcnow()}
-
 
 # -------------------------------------------------------------------
 # Routes
 # -------------------------------------------------------------------
 @app.route("/")
 def index():
-    # Si la table n'existe pas encore en prod, on évite de crasher.
     try:
         clients = Client.query.order_by(Client.name.asc()).all()
     except Exception:
@@ -86,13 +82,30 @@ def client_detail(client_id: int):
         abort(404)
     return render_template("client_detail.html", client=client)
 
-# ✅ Nouveau : endpoint 'catalog' pour que les templates ne plantent plus
+# ✅ Stub pour éviter le 500 depuis client_detail.html
+@app.route("/clients/<int:client_id>/movements/add", methods=["POST"], endpoint="add_movement")
+def add_movement(client_id: int):
+    # Pas de modèle Movement pour l’instant : on stabilise seulement le flux.
+    # On récupère les champs du formulaire si jamais ils existent déjà.
+    movement_type = request.form.get("movement_type", "").strip()  # "delivery" / "return"
+    note = request.form.get("note", "").strip()
+
+    try:
+        client = Client.query.get(client_id)
+    except Exception:
+        client = None
+
+    if not client:
+        abort(404)
+
+    flash("Saisie des livraisons & reprises — structure OK, logique BDD à venir.", "info")
+    # Quand on aura les modèles, on insérera ici et on redirigera pareil.
+    return redirect(url_for("client_detail", client_id=client.id))
+
+# Page catalogue neutre pour l’instant
 @app.route("/catalog", endpoint="catalog")
 def catalog_page():
-    # Page neutre pour l’instant : pas de requête sur un modèle “Product”
-    # tant que le schéma n’est pas stabilisé.
     return render_template("catalog.html")
-
 
 # -------------------------------------------------------------------
 # Lancement local : création des tables SQLite si besoin
