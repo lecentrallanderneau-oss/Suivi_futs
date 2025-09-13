@@ -1,27 +1,85 @@
 {% extends "base.html" %}
 {% block content %}
-  <h1 class="h4 mb-3">Fiche client</h1>
-
-  <div class="card mb-3">
-    <div class="card-body">
-      <h2 class="h5">{{ client.name }}</h2>
-      <p class="text-muted m-0">Ici on ajoutera livraisons & reprises.</p>
-    </div>
+<div class="d-flex align-items-center justify-content-between">
+  <h1 class="h4 m-0">{{ client.name }}</h1>
+  <div class="text-end small">
+    Contact : <strong>{{ client.contact or "—" }}</strong><br>
+    Stock actuel : <strong>{{ client_stock }}</strong> fûts
   </div>
+</div>
 
-  <!-- Formulaire "stub" vers add_movement : ne crée rien pour l’instant -->
-  <form method="post" action="{{ url_for('add_movement', client_id=client.id) }}" class="row g-2">
-    <div class="col-auto">
-      <select name="movement_type" class="form-select" required>
-        <option value="delivery">Livraison</option>
-        <option value="return">Reprise</option>
+<hr>
+
+<h2 class="h6">Ajouter un mouvement</h2>
+<form method="post" action="{{ url_for('add_movement', client_id=client.id) }}" class="card card-body mb-4">
+  <div class="row g-3 align-items-end">
+    <div class="col-md-6">
+      <label class="form-label">Produit *</label>
+      <input type="text" name="product" class="form-control" placeholder="Ex: Fût COREFF Blonde 20L" required>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">Quantité *</label>
+      <input type="number" name="quantity" class="form-control" min="1" required>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">Type *</label>
+      <select name="type" class="form-select" required>
+        <option value="livraison">Livraison</option>
+        <option value="reprise">Reprise</option>
       </select>
     </div>
-    <div class="col-auto">
-      <input type="text" name="note" class="form-control" placeholder="Note (optionnel)">
-    </div>
-    <div class="col-auto">
-      <button class="btn btn-primary" type="submit">Enregistrer (bientôt)</button>
-    </div>
+  </div>
+  <div class="mt-3">
+    <button class="btn btn-primary">Enregistrer</button>
+  </div>
+</form>
+
+<h2 class="h6">Historique des mouvements</h2>
+<div class="table-responsive">
+  <table class="table table-sm align-middle">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Type</th>
+        <th>Produit</th>
+        <th class="text-end">Quantité</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for m in movements %}
+      <tr>
+        <td>{{ m.date.strftime("%d/%m/%Y %H:%M") }}</td>
+        <td>
+          {% if m.type == 'livraison' %}
+            <span class="badge text-bg-success">Livraison</span>
+          {% else %}
+            <span class="badge text-bg-warning">Reprise</span>
+          {% endif %}
+        </td>
+        <td>{{ m.product }}</td>
+        <td class="text-end">
+          {% if m.type == 'livraison' %}+{% else %}-{% endif %}{{ m.quantity }}
+        </td>
+        <td class="text-end">
+          <form method="post" action="{{ url_for('delete_movement', movement_id=m.id) }}"
+                onsubmit="return confirm('Supprimer ce mouvement ?');">
+            <button class="btn btn-sm btn-outline-danger">Supprimer</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="text-center text-muted">Aucun mouvement pour l’instant.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="mt-3">
+  <form method="post" action="{{ url_for('delete_client', client_id=client.id) }}"
+        onsubmit="return confirm('Supprimer définitivement {{ client.name }} et tous ses mouvements ?');">
+    <button class="btn btn-outline-danger">Supprimer ce client</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Retour</a>
   </form>
+</div>
 {% endblock %}
