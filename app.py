@@ -1,201 +1,221 @@
 import os
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, url_for, flash
+from flask import Flask, render_template, request, redirect, url_for, abort, flash
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import text, func, select
+from sqlalchemy import text, select, func
 
-# -------------------- Config DB --------------------
-def normalize_db_url(url: str | None) -> str:
-    """Accepte DATABASE_URL (Render/Heroku) et assure le bon driver psycopg v3."""
-    if not url or url.strip() == "":
-        # Fallback local SQLite si pas de DATABASE_URL
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        return "sqlite:///" + os.path.join(base_dir, "suivi_futs.db")
-    url = url.strip()
-    # Render/Heroku envoient parfois "postgres://"
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql+psycopg://", 1)
-    # Ou "postgresql://"
-    if url.startswith("postgresql://") and not url.startswith("postgresql+psycopg://"):
-        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
-    return url
-
-DATABASE_URL = normalize_db_url(os.getenv("DATABASE_URL"))
-
+# -----------------------------------------------------------------------------
+# Config app & DB
+# -----------------------------------------------------------------------------
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
+
+# Préfère DATABASE_URL si présent (Render / Postgres), sinon SQLite fichier
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if DATABASE_URL:
+    # Correction Render (urls heroku-style): postgres:// -> postgresql://
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+else:
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///data.db"
+
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.secret_key = os.getenv("SECRET_KEY", "dev")
+
 db = SQLAlchemy(app)
 
-# -------------------- Modèles --------------------
+
+# -----------------------------------------------------------------------------
+# Modèles
+# -----------------------------------------------------------------------------
 class Client(db.Model):
+    __tablename__ = "client"
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False)
-    # IMPORTANT : colonne optionnelle. On gère sa création si absente.
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    # La colonne qui posait problème en prod : nous l'avons dans le modèle
     contact = db.Column(db.String(120), nullable=True)
 
-    movements = db.relationship(
-        "Movement",
-        backref="client",
-        lazy=True,
-        cascade="all, delete-orphan"
-    )
+    movements = db.relationship("Movement", backref="client", cascade="all, delete-orphan")
+
 
 class Movement(db.Model):
+    __tablename__ = "movement"
     id = db.Column(db.Integer, primary_key=True)
     client_id = db.Column(db.Integer, db.ForeignKey("client.id"), nullable=False)
-    product = db.Column(db.String(120), nullable=False)
+    type = db.Column(db.String(20), nullable=False)  # 'livraison' ou 'reprise'
+    product = db.Column(db.String(200), nullable=False)
     quantity = db.Column(db.Integer, nullable=False)
-    type = db.Column(db.String(20), nullable=False)  # "livraison" | "reprise"
-    date = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    date = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
-# -------------------- Utilitaires --------------------
-@app.context_processor
-def inject_now():
-    # Evite l'erreur 'now' is undefined dans les templates
-    return {"now": datetime.utcnow()}
 
-def add_missing_contact_column_if_needed() -> None:
-    """Ajoute la colonne 'contact' si elle n'existe pas (Postgres / SQLite)."""
+# -----------------------------------------------------------------------------
+# Garde-fou schéma : création tables + ajout colonne manquante
+# -----------------------------------------------------------------------------
+def ensure_schema():
+    """
+    1) Crée les tables qui n'existent pas
+    2) Ajoute la colonne client.contact si elle manque (Postgres & SQLite)
+    """
+    # 1) Crée tables manquantes (n'ajoute pas de colonnes manquantes)
+    with app.app_context():
+        db.create_all()
+
+    # 2) Ajoute colonne client.contact si absente
     with db.engine.begin() as conn:
         backend = db.engine.url.get_backend_name()
+
         if backend == "postgresql":
-            # Vérifie via information_schema
-            exists = conn.execute(text("""
+            missing = conn.execute(text("""
                 SELECT 1
                 FROM information_schema.columns
                 WHERE table_name = 'client' AND column_name = 'contact'
                 LIMIT 1
-            """)).first()
-            if not exists:
+            """)).first() is None
+
+            if missing:
                 conn.execute(text("ALTER TABLE client ADD COLUMN contact VARCHAR(120)"))
+
         else:
-            # SQLite
-            cols = conn.execute(text("PRAGMA table_info(client)")).fetchall()
-            names = {row[1] for row in cols}  # (cid, name, type, notnull, dflt_value, pk)
+            # SQLite (dev/local)
+            rows = conn.execute(text("PRAGMA table_info(client)")).fetchall()
+            names = {row[1] for row in rows}  # row[1] = column name
             if "contact" not in names:
-                conn.execute(text("ALTER TABLE client ADD COLUMN contact VARCHAR(120)"))
+                conn.execute(text("ALTER TABLE client ADD COLUMN contact TEXT"))
 
-def safe_client_count() -> int:
-    """Évite un SELECT incluant des colonnes manquantes (e.g. contact)."""
-    return db.session.execute(select(func.count()).select_from(Client)).scalar() or 0
 
-def ensure_db():
-    # Crée les tables si absentes
-    db.create_all()
-    # Ajoute la colonne contact si manquante (empêche l'erreur « column client.contact does not exist »)
-    add_missing_contact_column_if_needed()
+def safe_count_clients():
+    """Count idempotent sans sélectionner toutes les colonnes (évite surprises)."""
+    with app.app_context():
+        return db.session.execute(
+            select(func.count()).select_from(Client)
+        ).scalar() or 0
 
-    # Seed minimal si base vide (via COUNT(*) uniquement)
-    if safe_client_count() == 0:
-        demo = Client(name="Client Démo", contact="demo@example.com")
-        db.session.add(demo)
-        db.session.flush()
-        db.session.add_all([
-            Movement(client_id=demo.id, product="Fût COREFF Blonde 20L", quantity=5, type="livraison"),
-            Movement(client_id=demo.id, product="Fût COREFF Blonde 20L", quantity=2, type="reprise"),
-        ])
-        db.session.commit()
 
-with app.app_context():
-    ensure_db()
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def compute_client_stock(client_id: int) -> int:
+    """Stock = livraisons - reprises."""
+    q = db.session.execute(
+        select(
+            func.sum(func.case((Movement.type == "livraison", Movement.quantity), else_=0)),
+            func.sum(func.case((Movement.type == "reprise", Movement.quantity), else_=0)),
+        ).where(Movement.client_id == client_id)
+    ).first()
+    if not q:
+        return 0
+    liv, rep = q
+    liv = liv or 0
+    rep = rep or 0
+    return int(liv - rep)
 
-def stock_client(client: Client) -> int:
-    """Stock net = livraisons - reprises."""
-    total = 0
-    for m in client.movements:
-        total += m.quantity if m.type == "livraison" else -m.quantity
-    return total
 
-# -------------------- Routes existantes & ajouts --------------------
+# -----------------------------------------------------------------------------
+# Routes
+# -----------------------------------------------------------------------------
 @app.route("/")
 def index():
-    # Affichage simple des clients (le template existant doit déjà marcher)
+    ensure_schema()  # Toujours avant premières requêtes
+    # Liste clients, tri par nom
     clients = Client.query.order_by(Client.name).all()
-    # Pré-calc des stocks si tu l'utilises dans l'index
-    stocks = {c.id: stock_client(c) for c in clients}
+    # Calcule un stock rapide par client (facultatif)
+    stocks = {c.id: compute_client_stock(c.id) for c in clients}
     return render_template("index.html", clients=clients, stocks=stocks)
 
+
 @app.route("/clients/<int:client_id>")
-def client_detail(client_id: int):
+def client_detail(client_id):
+    ensure_schema()
     client = Client.query.get_or_404(client_id)
-    movements = (
-        Movement.query
-        .filter_by(client_id=client.id)
-        .order_by(Movement.date.desc(), Movement.id.desc())
-        .all()
-    )
+    movements = Movement.query.filter_by(client_id=client.id).order_by(Movement.date.desc()).all()
+    client_stock = compute_client_stock(client.id)
     return render_template(
         "client_detail.html",
         client=client,
         movements=movements,
-        client_stock=stock_client(client)
+        client_stock=client_stock,
     )
 
-# ------ AJOUT : création d'un client (si tu as déjà un formulaire ailleurs, garde le tien) ------
-@app.route("/clients/new", methods=["GET", "POST"])
-def new_client():
-    if request.method == "POST":
-        name = (request.form.get("name") or "").strip()
-        contact = (request.form.get("contact") or "").strip()
-        if not name:
-            flash("Le nom du client est obligatoire.", "danger")
-            return redirect(url_for("new_client"))
-        db.session.add(Client(name=name, contact=contact or None))
-        db.session.commit()
-        flash("Client ajouté.", "success")
+
+@app.route("/clients/add", methods=["POST"])
+def add_client():
+    ensure_schema()
+    name = (request.form.get("name") or "").strip()
+    contact = (request.form.get("contact") or "").strip() or None
+    if not name:
+        flash("Le nom du client est obligatoire.", "warning")
         return redirect(url_for("index"))
-    # Template très simple ou remplace par le tien
-    return render_template("new_client.html")
 
-# ------ AJOUT : enregistrement d'un mouvement (livraison / reprise) ------
-@app.route("/clients/<int:client_id>/add_movement", methods=["POST"])
-def add_movement(client_id: int):
+    # Unicité simple par nom
+    exists = db.session.execute(
+        select(Client.id).where(func.lower(Client.name) == name.lower())
+    ).first()
+    if exists:
+        flash("Ce client existe déjà.", "warning")
+        return redirect(url_for("index"))
+
+    c = Client(name=name, contact=contact)
+    db.session.add(c)
+    db.session.commit()
+    flash("Client ajouté.", "success")
+    return redirect(url_for("index"))
+
+
+@app.route("/clients/<int:client_id>/delete", methods=["POST"])
+def delete_client(client_id):
+    ensure_schema()
     client = Client.query.get_or_404(client_id)
-    product = (request.form.get("product") or "").strip()
-    mov_type = (request.form.get("type") or "").strip().lower()
-    try:
-        quantity = int(request.form.get("quantity") or 0)
-    except ValueError:
-        quantity = 0
+    db.session.delete(client)  # cascade supprime ses mouvements
+    db.session.commit()
+    flash("Client supprimé.", "success")
+    return redirect(url_for("index"))
 
-    if not product or mov_type not in ("livraison", "reprise") or quantity <= 0:
-        flash("Vérifie le produit, la quantité (>0) et le type (livraison/reprise).", "danger")
+
+@app.route("/clients/<int:client_id>/movements/add", methods=["POST"])
+def add_movement(client_id):
+    ensure_schema()
+    client = Client.query.get_or_404(client_id)
+
+    mtype = request.form.get("type")
+    product = (request.form.get("product") or "").strip()
+    quantity = request.form.get("quantity", type=int)
+
+    if mtype not in ("livraison", "reprise"):
+        flash("Type invalide.", "danger")
         return redirect(url_for("client_detail", client_id=client.id))
 
-    db.session.add(Movement(
+    if not product or not quantity or quantity <= 0:
+        flash("Produit et quantité sont obligatoires (quantité > 0).", "warning")
+        return redirect(url_for("client_detail", client_id=client.id))
+
+    m = Movement(
         client_id=client.id,
+        type=mtype,
         product=product,
         quantity=quantity,
-        type=mov_type
-    ))
+        date=datetime.utcnow(),
+    )
+    db.session.add(m)
     db.session.commit()
     flash("Mouvement enregistré.", "success")
     return redirect(url_for("client_detail", client_id=client.id))
 
-# ------ AJOUT : suppression d'un client ------
-@app.route("/clients/<int:client_id>/delete", methods=["POST"])
-def delete_client(client_id: int):
-    client = Client.query.get_or_404(client_id)
-    name = client.name
-    db.session.delete(client)  # cascade = supprime ses mouvements
-    db.session.commit()
-    flash(f"Client « {name} » supprimé.", "warning")
-    return redirect(url_for("index"))
 
-# ------ AJOUT : suppression d’un mouvement ------
 @app.route("/movements/<int:movement_id>/delete", methods=["POST"])
-def delete_movement(movement_id: int):
-    mvt = Movement.query.get_or_404(movement_id)
-    cid = mvt.client_id
-    db.session.delete(mvt)
+def delete_movement(movement_id):
+    ensure_schema()
+    m = Movement.query.get_or_404(movement_id)
+    cid = m.client_id
+    db.session.delete(m)
     db.session.commit()
-    flash("Mouvement supprimé.", "warning")
+    flash("Mouvement supprimé.", "success")
     return redirect(url_for("client_detail", client_id=cid))
 
-# -------------------- Run local --------------------
+
+# -----------------------------------------------------------------------------
+# Lancement
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    with app.app_context():
-        ensure_db()
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    # Démarrage local
+    ensure_schema()
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
