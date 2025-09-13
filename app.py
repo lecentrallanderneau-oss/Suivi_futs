@@ -1,336 +1,340 @@
+# app.py
+from __future__ import annotations
 import os
 from datetime import datetime
 from decimal import Decimal
-from flask import Flask, render_template, request, redirect, url_for, flash
+
+from flask import Flask, render_template, render_template_string, request, redirect, url_for, abort
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 
-# ----------------------------------------------------------------------------
-# App & DB
-# ----------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Config Flask + DB (une seule instance SQLAlchemy(app))
+# ------------------------------------------------------------------------------
+def _make_db_uri() -> str:
+    uri = os.getenv("DATABASE_URL", "").strip()
+    if not uri:
+        # pour dev local éventuel
+        return "sqlite:///local.db"
+    # Render fournit souvent postgres:// -> il faut postgresql+psycopg://
+    if uri.startswith("postgres://"):
+        uri = uri.replace("postgres://", "postgresql+psycopg://", 1)
+    elif uri.startswith("postgresql://"):
+        uri = uri.replace("postgresql://", "postgresql+psycopg://", 1)
+    return uri
+
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev")
-db_url = os.environ.get("DATABASE_URL") or "sqlite:///local.db"
-if db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
-app.config["SQLALCHEMY_DATABASE_URI"] = db_url
+app.config["SQLALCHEMY_DATABASE_URI"] = _make_db_uri()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-db = SQLAlchemy(app)
 
-# ----------------------------------------------------------------------------
-# MODELS (minimal for starter; will be ignored if real models.py is present)
-# ----------------------------------------------------------------------------
-# We try to import your project models if they exist.
-try:
-    from models import db as ext_db  # type: ignore
-    db = ext_db  # type: ignore[assignment]
-    from models import Client, KegMove, EquipMove  # type: ignore
-except Exception:
-    class Client(db.Model):  # type: ignore
-        __tablename__ = "clients"
-        id = db.Column(db.Integer, primary_key=True)
-        name = db.Column(db.String(120), nullable=False, unique=True)
-        note = db.Column(db.Text, nullable=True)
-        created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+db = SQLAlchemy(app)  # <<<<< UNE SEULE instance, directement liée à app
 
-    class KegMove(db.Model):  # type: ignore
-        __tablename__ = "keg_moves"
-        id = db.Column(db.Integer, primary_key=True)
-        client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False)
-        created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-        qty_out = db.Column(db.Integer, default=0, nullable=False)     # fûts livrés
-        qty_in = db.Column(db.Integer, default=0, nullable=False)      # fûts repris
-        qty_defect = db.Column(db.Integer, default=0, nullable=False)  # fûts défectueux
-        note = db.Column(db.Text)
+# ------------------------------------------------------------------------------
+# Modèles (simples, tout-en-un)
+# ------------------------------------------------------------------------------
+class Client(db.Model):
+    __tablename__ = "clients"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(128), nullable=False, unique=True)
+    note = db.Column(db.Text, nullable=True, default="")
 
-    class EquipMove(db.Model):  # type: ignore
-        __tablename__ = "equip_moves"
-        id = db.Column(db.Integer, primary_key=True)
-        client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False)
-        created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-        equip_name = db.Column(db.String(120), nullable=False)
-        qty_out = db.Column(db.Integer, default=0, nullable=False)
-        qty_in = db.Column(db.Integer, default=0, nullable=False)
-        note = db.Column(db.Text)
+class KegMove(db.Model):
+    __tablename__ = "keg_moves"
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False, index=True)
+    qty_out = db.Column(db.Integer, nullable=False, default=0)     # fûts livrés
+    qty_in = db.Column(db.Integer, nullable=False, default=0)      # fûts repris
+    qty_defect = db.Column(db.Integer, nullable=False, default=0)  # fûts défectueux repris (déconsigne)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
-# ----------------------------------------------------------------------------
-# Jinja filters
-# ----------------------------------------------------------------------------
-@app.template_filter("eur")
-def eur(v):
-    try:
-        q = Decimal(v or 0)
-    except Exception:
-        q = Decimal(0)
-    return f"{q:,.2f} €".replace(",", " ").replace(".", ",")
+class EquipMove(db.Model):
+    __tablename__ = "equip_moves"
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False, index=True)
+    equip_name = db.Column(db.String(128), nullable=False)         # ex: Tireuse, CO2, Barnum...
+    qty_out = db.Column(db.Integer, nullable=False, default=0)     # prêt
+    qty_in = db.Column(db.Integer, nullable=False, default=0)      # retour
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
-# ----------------------------------------------------------------------------
-# Auto-migration: ensure missing tables/columns exist
-# ----------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Auto-migration minimale (création des tables/colonnes manquantes)
+# ------------------------------------------------------------------------------
 def ensure_schema():
     with app.app_context():
-        inspector = inspect(db.engine)
-        # clients table
-        if not inspector.has_table("clients"):
-            db.session.execute(text("""
-                CREATE TABLE clients (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(120) NOT NULL UNIQUE,
-                    note TEXT,
-                    created_at TIMESTAMP NOT NULL DEFAULT NOW()
-                );
-            """))
-        else:
-            cols = {c["name"] for c in inspector.get_columns("clients")}
-            if "note" not in cols:
-                db.session.execute(text("ALTER TABLE clients ADD COLUMN note TEXT;"))
+        # crée les tables manquantes
+        db.create_all()
 
-        # keg_moves table
-        if not inspector.has_table("keg_moves"):
-            db.session.execute(text("""
-                CREATE TABLE keg_moves (
-                    id SERIAL PRIMARY KEY,
-                    client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-                    qty_out INTEGER NOT NULL DEFAULT 0,
-                    qty_in INTEGER NOT NULL DEFAULT 0,
-                    qty_defect INTEGER NOT NULL DEFAULT 0,
-                    note TEXT
-                );
-                CREATE INDEX IF NOT EXISTS ix_keg_moves_client ON keg_moves(client_id);
-            """))
+        # Ajout sécurisé de colonnes si besoin (Postgres accepte IF NOT EXISTS)
+        dialect_name = db.session.bind.dialect.name
+        if dialect_name == "postgresql":
+            ddl = [
+                # clients.note
+                "ALTER TABLE clients ADD COLUMN IF NOT EXISTS note TEXT",
+                # keg_moves
+                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_out INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_in INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_defect INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()",
+                # equip_moves
+                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS equip_name VARCHAR(128)",
+                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS qty_out INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS qty_in INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()",
+            ]
+            for stmt in ddl:
+                db.session.execute(text(stmt))
+            db.session.commit()
         else:
-            cols = {c["name"] for c in inspector.get_columns("keg_moves")}
-            for needed in ("qty_out", "qty_in", "qty_defect"):
-                if needed not in cols:
-                    db.session.execute(text(f"ALTER TABLE keg_moves ADD COLUMN {needed} INTEGER NOT NULL DEFAULT 0;"))
-            if "created_at" not in cols:
-                db.session.execute(text("ALTER TABLE keg_moves ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT NOW();"))
+            # sqlite : create_all suffit ; pour des colonnes manquantes il faudrait migrer, on reste simple.
+            pass
 
-        # equip_moves table
-        if not inspector.has_table("equip_moves"):
-            db.session.execute(text("""
-                CREATE TABLE equip_moves (
-                    id SERIAL PRIMARY KEY,
-                    client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-                    equip_name VARCHAR(120) NOT NULL,
-                    qty_out INTEGER NOT NULL DEFAULT 0,
-                    qty_in INTEGER NOT NULL DEFAULT 0,
-                    note TEXT
-                );
-                CREATE INDEX IF NOT EXISTS ix_equip_moves_client ON equip_moves(client_id);
-            """))
-        else:
-            cols = {c["name"] for c in inspector.get_columns("equip_moves")}
-            for needed in ("equip_name", "qty_out", "qty_in"):
-                if needed not in cols:
-                    if needed == "equip_name":
-                        db.session.execute(text("ALTER TABLE equip_moves ADD COLUMN equip_name VARCHAR(120) NOT NULL DEFAULT 'Matériel';"))
-                    else:
-                        db.session.execute(text(f"ALTER TABLE equip_moves ADD COLUMN {needed} INTEGER NOT NULL DEFAULT 0;"))
-            if "created_at" not in cols:
-                db.session.execute(text("ALTER TABLE equip_moves ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT NOW();"))
-        db.session.commit()
-
-# Run once on startup
+# Exécuter l’auto-migration une fois au démarrage
 ensure_schema()
 
-# ----------------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------------
-CONS_PER_KEG = Decimal("30")
+# ------------------------------------------------------------------------------
+# Filtre Jinja € (eur)
+# ------------------------------------------------------------------------------
+@app.template_filter("eur")
+def eur(value):
+    try:
+        v = Decimal(value)
+    except Exception:
+        v = Decimal(0)
+    # format fr: 1 234,56 €
+    s = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", " ")
+    return f"{s} €"
 
-def client_keg_summary(client_id: int):
-    r = (
-        db.session.query(
-            db.func.coalesce(db.func.sum(KegMove.qty_out), 0),
-            db.func.coalesce(db.func.sum(KegMove.qty_in), 0),
-            db.func.coalesce(db.func.sum(KegMove.qty_defect), 0),
-        )
-        .filter(KegMove.client_id == client_id)
-        .one()
-    )
-    out_q, in_q, defect_q = map(lambda x: int(x or 0), r)
-    in_play = out_q - in_q - defect_q
-    consigne = Decimal(in_play) * CONS_PER_KEG
-    return {"out": out_q, "in": in_q, "defect": defect_q, "in_play": in_play, "consigne": consigne}
+# ------------------------------------------------------------------------------
+# Helpers de calcul
+# ------------------------------------------------------------------------------
+CONSigne_PAR_FUT = Decimal("30")
 
-def client_equip_summary(client_id: int):
-    r = (
-        db.session.query(
-            db.func.coalesce(db.func.sum(EquipMove.qty_out), 0),
-            db.func.coalesce(db.func.sum(EquipMove.qty_in), 0),
-        )
-        .filter(EquipMove.client_id == client_id)
-        .one()
-    )
-    out_q, in_q = map(lambda x: int(x or 0), r)
-    return {"out": out_q, "in": in_q, "in_play": out_q - in_q}
+def client_keg_summary(client_id: int) -> dict:
+    """Retourne les totaux fûts pour un client."""
+    row = db.session.execute(
+        text(
+            """
+            SELECT
+              COALESCE(SUM(qty_out), 0) AS out,
+              COALESCE(SUM(qty_in), 0) AS in,
+              COALESCE(SUM(qty_defect), 0) AS defect
+            FROM keg_moves
+            WHERE client_id = :cid
+            """
+        ),
+        {"cid": client_id},
+    ).one()
 
-# ----------------------------------------------------------------------------
+    qty_out = int(row.out or 0)
+    qty_in = int(row.in or 0)
+    qty_def = int(row.defect or 0)
+    in_play = qty_out - qty_in - qty_def
+    consignes = CONSigne_PAR_FUT * Decimal(max(in_play, 0))
+    return {"out": qty_out, "in": qty_in, "defect": qty_def, "in_play": in_play, "consignes": consignes}
+
+def client_equip_summary(client_id: int) -> dict[str, int]:
+    rows = db.session.execute(
+        text(
+            """
+            SELECT equip_name, COALESCE(SUM(qty_out),0) - COALESCE(SUM(qty_in),0) AS on_loan
+            FROM equip_moves
+            WHERE client_id = :cid
+            GROUP BY equip_name
+            HAVING COALESCE(SUM(qty_out),0) - COALESCE(SUM(qty_in),0) <> 0
+            ORDER BY equip_name
+            """
+        ),
+        {"cid": client_id},
+    ).all()
+    return {r.equip_name: int(r.on_loan or 0) for r in rows}
+
+# ------------------------------------------------------------------------------
 # Routes
-# ----------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 @app.route("/")
 def index():
     clients = Client.query.order_by(Client.name.asc()).all()
-    rows = []
-    tot_keg = tot_cons = 0
+    cards = []
+    total_kegs = 0
+    total_consignes = Decimal("0")
     for c in clients:
-        keg = client_keg_summary(c.id)
-        eq = client_equip_summary(c.id)
-        tot_keg += keg["in_play"]
-        tot_cons += keg["consigne"]
-        rows.append({
-            "id": c.id,
-            "name": c.name,
-            "note": getattr(c, "note", None),
-            "kegs": keg["in_play"],
-            "equip": eq["in_play"],
-            "consigne": keg["consigne"],
-        })
-    return render_template("index.html", clients=rows, total_kegs=tot_keg, total_cons=tot_cons)
+        k = client_keg_summary(c.id)
+        e = client_equip_summary(c.id)
+        total_kegs += max(k["in_play"], 0)
+        total_consignes += k["consignes"]
+        cards.append(
+            {
+                "id": c.id,
+                "name": c.name,
+                "note": c.note or "",
+                "kegs_in_play": k["in_play"],
+                "consignes": k["consignes"],
+                "equip": e,
+            }
+        )
+
+    # essaie templates/index.html si présent, sinon fallback inline
+    try:
+        return render_template("index.html", cards=cards, total_kegs=total_kegs, total_consignes=total_consignes)
+    except Exception:
+        return render_template_string(
+            """
+            <!doctype html><html><head><meta charset="utf-8"><title>Suivi fûts</title>
+            <style>body{font-family:system-ui;margin:2rem} .card{border:1px solid #ddd;padding:1rem;margin-bottom:1rem;border-radius:.5rem}
+            .head{display:flex;justify-content:space-between;align-items:center}
+            .chip{background:#eef;padding:.2rem .5rem;border-radius:.4rem}
+            </style></head><body>
+            <h1>Suivi fûts</h1>
+            <p>Total fûts en circulation: <b>{{ total_kegs }}</b> — Consignes en jeu: <b>{{ total_consignes|eur }}</b></p>
+            <p><a href="{{ url_for('new_client') }}">➕ Nouveau client</a></p>
+            {% for c in cards %}
+            <div class="card">
+              <div class="head">
+                <h3><a href="{{ url_for('client_detail', client_id=c.id) }}">{{ c.name }}</a></h3>
+                <span class="chip">{{ c.kegs_in_play }} fûts — {{ c.consignes|eur }}</span>
+              </div>
+              {% if c.equip %}
+                <div>Matériel: {% for k,v in c.equip.items() %}<span class="chip">{{k}}: {{v}}</span> {% endfor %}</div>
+              {% endif %}
+              {% if c.note %}<div style="color:#666"><em>{{ c.note }}</em></div>{% endif %}
+            </div>
+            {% endfor %}
+            </body></html>
+            """,
+            cards=cards,
+            total_kegs=total_kegs,
+            total_consignes=total_consignes,
+        )
 
 @app.route("/clients/new", methods=["GET", "POST"])
-def clients_new():
+def new_client():
     if request.method == "POST":
-        name = request.form.get("name", "").strip()
-        note = request.form.get("note") or None
+        name = (request.form.get("name") or "").strip()
+        note = (request.form.get("note") or "").strip()
         if not name:
-            flash("Nom obligatoire.", "danger")
-        else:
-            c = Client(name=name, note=note)
-            db.session.add(c)
+            abort(400, "Nom requis")
+        # upsert simple par nom
+        existing = Client.query.filter_by(name=name).first()
+        if existing:
+            existing.note = note
             db.session.commit()
-            flash("Client créé.", "success")
-            return redirect(url_for("index"))
-    return render_template("client_new.html")
+            return redirect(url_for("client_detail", client_id=existing.id))
+        c = Client(name=name, note=note)
+        db.session.add(c)
+        db.session.commit()
+        return redirect(url_for("client_detail", client_id=c.id))
+    # GET
+    try:
+        return render_template("client_new.html")
+    except Exception:
+        return render_template_string(
+            """
+            <h1>Nouveau client</h1>
+            <form method="post">
+              <label>Nom<br><input name="name" required></label><br><br>
+              <label>Note<br><textarea name="note" rows="3"></textarea></label><br><br>
+              <button type="submit">Enregistrer</button>
+            </form>
+            """
+        )
 
 @app.route("/client/<int:client_id>")
-def client_detail(client_id):
-    c = Client.query.get_or_404(client_id)
-    keg_hist = (
-        KegMove.query.filter_by(client_id=client_id)
-        .order_by(KegMove.created_at.desc())
-        .limit(50)
-        .all()
-    )
-    equip_hist = (
-        EquipMove.query.filter_by(client_id=client_id)
-        .order_by(EquipMove.created_at.desc())
-        .limit(50)
-        .all()
-    )
-    keg = client_keg_summary(client_id)
-    eq = client_equip_summary(client_id)
-    return render_template("client_detail.html", c=c, keg=keg, equip=eq, keg_hist=keg_hist, equip_hist=equip_hist)
+def client_detail(client_id: int):
+    c = db.session.get(Client, client_id) or abort(404)
+    k = client_keg_summary(client_id)
+    e = client_equip_summary(client_id)
+
+    keg_rows = KegMove.query.filter_by(client_id=client_id).order_by(KegMove.created_at.desc()).limit(100).all()
+    equip_rows = EquipMove.query.filter_by(client_id=client_id).order_by(EquipMove.created_at.desc()).limit(100).all()
+
+    try:
+        return render_template(
+            "client_detail.html",
+            c=c,
+            k=k,
+            e=e,
+            keg_rows=keg_rows,
+            equip_rows=equip_rows,
+            CONSIGNE=float(CONSigne_PAR_FUT),
+        )
+    except Exception:
+        return render_template_string(
+            """
+            <h1>{{ c.name }}</h1>
+            <p>Fûts en circulation: <b>{{ k.in_play }}</b> — Consignes: <b>{{ k.consignes|eur }}</b></p>
+            <h3>Ajouter mouvement fûts</h3>
+            <form method="post" action="{{ url_for('add_keg_move', client_id=c.id) }}">
+              <label>Livrés (out) <input type="number" name="qty_out" value="0"></label>
+              <label>Repris (in) <input type="number" name="qty_in" value="0"></label>
+              <label>Défectueux <input type="number" name="qty_defect" value="0"></label>
+              <button type="submit">Ajouter</button>
+            </form>
+            <h3>Ajouter mouvement matériel</h3>
+            <form method="post" action="{{ url_for('add_equip_move', client_id=c.id) }}">
+              <label>Matériel <input name="equip_name" placeholder="Tireuse / CO2 / Barnum"></label>
+              <label>Prêt (out) <input type="number" name="qty_out" value="0"></label>
+              <label>Retour (in) <input type="number" name="qty_in" value="0"></label>
+              <button type="submit">Ajouter</button>
+            </form>
+            <h3>Historique fûts</h3>
+            <ul>
+              {% for r in keg_rows %}
+                <li>{{ r.created_at.strftime("%d/%m/%Y") }} — out: {{ r.qty_out }}, in: {{ r.qty_in }}, defect: {{ r.qty_defect }}</li>
+              {% endfor %}
+            </ul>
+            <h3>Historique matériel</h3>
+            <ul>
+              {% for r in equip_rows %}
+                <li>{{ r.created_at.strftime("%d/%m/%Y") }} — {{ r.equip_name }}: +{{ r.qty_out }} / -{{ r.qty_in }}</li>
+              {% endfor %}
+            </ul>
+            """,
+            c=c,
+            k=k,
+            e=e,
+            keg_rows=keg_rows,
+            equip_rows=equip_rows,
+            CONSIGNE=float(CONSigne_PAR_FUT),
+        )
 
 @app.route("/client/<int:client_id>/keg/new", methods=["POST"])
-def keg_new(client_id):
-    qty_out = int(request.form.get("qty_out") or 0)
-    qty_in = int(request.form.get("qty_in") or 0)
-    qty_defect = int(request.form.get("qty_defect") or 0)
-    note = request.form.get("note")
-    m = KegMove(client_id=client_id, qty_out=qty_out, qty_in=qty_in, qty_defect=qty_defect, note=note)
+def add_keg_move(client_id: int):
+    c = db.session.get(Client, client_id) or abort(404)
+    def _to_int(name): 
+        try: return int(request.form.get(name, "0") or 0)
+        except: return 0
+    m = KegMove(
+        client_id=c.id,
+        qty_out=_to_int("qty_out"),
+        qty_in=_to_int("qty_in"),
+        qty_defect=_to_int("qty_defect"),
+        created_at=datetime.utcnow(),
+    )
     db.session.add(m)
     db.session.commit()
-    flash("Mouvement fûts enregistré.", "success")
-    return redirect(url_for("client_detail", client_id=client_id))
+    return redirect(url_for("client_detail", client_id=c.id))
 
 @app.route("/client/<int:client_id>/equip/new", methods=["POST"])
-def equip_new(client_id):
-    equip_name = (request.form.get("equip_name") or "Matériel").strip() or "Matériel"
-    qty_out = int(request.form.get("qty_out") or 0)
-    qty_in = int(request.form.get("qty_in") or 0)
-    note = request.form.get("note")
-    m = EquipMove(client_id=client_id, equip_name=equip_name, qty_out=qty_out, qty_in=qty_in, note=note)
+def add_equip_move(client_id: int):
+    c = db.session.get(Client, client_id) or abort(404)
+    name = (request.form.get("equip_name") or "").strip() or "Matériel"
+    def _to_int(name): 
+        try: return int(request.form.get(name, "0") or 0)
+        except: return 0
+    m = EquipMove(
+        client_id=c.id,
+        equip_name=name,
+        qty_out=_to_int("qty_out"),
+        qty_in=_to_int("qty_in"),
+        created_at=datetime.utcnow(),
+    )
     db.session.add(m)
     db.session.commit()
-    flash("Mouvement matériel enregistré.", "success")
-    return redirect(url_for("client_detail", client_id=client_id))
+    return redirect(url_for("client_detail", client_id=c.id))
 
-# ----------------------------------------------------------------------------
-# Minimal templates (fallback if your repo hasn't them)
-# ----------------------------------------------------------------------------
-# These allow the app to render even if templates are missing in the repo.
-from jinja2 import TemplateNotFound
-
-def _render_or_inline(tpl_name, inline_html):
-    try:
-        return render_template(tpl_name)
-    except TemplateNotFound:
-        return inline_html
-
-@app.route("/__inline__/index.html")
-def __inline_index():
-    return _render_or_inline("index.html", """
-<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Suivi fûts</title></head>
-<body>
-  <h1>Clients</h1>
-  <p>Total fûts en jeu: {{ total_kegs }} — Consignes: {{ total_cons|eur }}</p>
-  <ul>
-    {% for r in clients %}
-      <li><a href="{{ url_for('client_detail', client_id=r.id) }}">{{ r.name }}</a> — fûts: {{ r.kegs }}, matériel: {{ r.equip }}, consignes: {{ r.consigne|eur }}</li>
-    {% endfor %}
-  </ul>
-  <p><a href="{{ url_for('clients_new') }}">+ Nouveau client</a></p>
-</body></html>
-""")
-
-# Serve real template name too so the route works with real files.
-@app.route("/__inline__/client_new.html")
-def __inline_client_new():
-    return _render_or_inline("client_new.html", """
-<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Nouveau client</title></head>
-<body>
-  <h1>Nouveau client</h1>
-  <form method="post">
-    <label>Nom <input name="name" required></label><br>
-    <label>Note <input name="note"></label><br>
-    <button type="submit">Créer</button>
-  </form>
-  <p><a href="{{ url_for('index') }}">Retour</a></p>
-</body></html>
-""")
-
-@app.route("/__inline__/client_detail.html")
-def __inline_client_detail():
-    return _render_or_inline("client_detail.html", """
-<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Client</title></head>
-<body>
-  <h1>{{ c.name }}</h1>
-  <p>Fûts en jeu: {{ keg.in_play }} — Consignes: {{ keg.consigne|eur }}</p>
-  <h2>Saisir mouvement fûts</h2>
-  <form method="post" action="{{ url_for('keg_new', client_id=c.id) }}">
-    Sortis <input type="number" name="qty_out" min="0" value="0">
-    Rentrés <input type="number" name="qty_in" min="0" value="0">
-    Défectueux <input type="number" name="qty_defect" min="0" value="0">
-    <input name="note" placeholder="Note">
-    <button type="submit">Enregistrer</button>
-  </form>
-
-  <h2>Saisir mouvement matériel</h2>
-  <form method="post" action="{{ url_for('equip_new', client_id=c.id) }}">
-    Matériel <input name="equip_name" placeholder="Tireuse, CO2, etc.">
-    Sortis <input type="number" name="qty_out" min="0" value="0">
-    Rentrés <input type="number" name="qty_in" min="0" value="0">
-    <input name="note" placeholder="Note">
-    <button type="submit">Enregistrer</button>
-  </form>
-
-  <h2>Historique fûts</h2>
-  <ul>{% for m in keg_hist %}
-      <li>{{ m.created_at.date() }} — +{{ m.qty_out }} / -{{ m.qty_in }} / défectueux {{ m.qty_defect }} — {{ m.note or '' }}</li>
-  {% endfor %}</ul>
-
-  <h2>Historique matériel</h2>
-  <ul>{% for m in equip_hist %}
-      <li>{{ m.created_at.date() }} — {{ m.equip_name }} : +{{ m.qty_out }} / -{{ m.qty_in }} — {{ m.note or '' }}</li>
-  {% endfor %}</ul>
-
-  <p><a href="{{ url_for('index') }}">Retour</a></p>
-</body></html>
-""")
-
+# ------------------------------------------------------------------------------
+# Entrée
+# ------------------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    # Débogage local : flask builtin server
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
