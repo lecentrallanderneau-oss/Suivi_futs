@@ -1,118 +1,214 @@
-from __future__ import annotations
-
+# app.py
 import os
 from datetime import datetime
-from urllib.parse import urlparse
+from flask import Flask, render_template, request, redirect, url_for, flash
+from dotenv import load_dotenv
 
-from flask import (
-    Flask, render_template, abort,
-    redirect, url_for, request, flash,
-)
-from flask_sqlalchemy import SQLAlchemy
+from models import db, Client, Product, Movement
 
+load_dotenv()
+
+# ------------------------------------------------------------------
+# App & DB
+# ------------------------------------------------------------------
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
 
-# -------------------------------------------------------------------
-# Base de données
-#  - Prod (Render): DATABASE_URL -> psycopg (psycopg3)
-#  - Local: SQLite
-# -------------------------------------------------------------------
-db_url = os.environ.get("DATABASE_URL")
-if db_url:
-    if db_url.startswith("postgres://"):
-        db_url = db_url.replace("postgres://", "postgresql://", 1)
-    if db_url.startswith("postgresql://"):
-        db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
-else:
-    db_url = "sqlite:///local.db"
+# Render/Heroku donnent souvent une URL qui commence par postgres://
+db_url = os.environ.get("DATABASE_URL", "sqlite:///local.db")
+if db_url.startswith("postgres://"):
+    # SQLAlchemy moderne + psycopg3
+    db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
 
 app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 
-db = SQLAlchemy(app)
+db.init_app(app)
 
-# -------------------------------------------------------------------
-# Modèles MINIMAUX
-# -------------------------------------------------------------------
-class Client(db.Model):
-    __tablename__ = "clients"
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String, nullable=False)
 
-# -------------------------------------------------------------------
-# Filtres & context
-# -------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
 @app.template_filter("eur")
-def eur_filter(cents: int | None) -> str:
-    value = (cents or 0) / 100.0
-    return f"{value:,.2f} €".replace(",", "X").replace(".", ",").replace("X", " ")
+def eur_filter(value_cents: int) -> str:
+    try:
+        euros = (value_cents or 0) / 100.0
+        return f"{euros:,.2f} €".replace(",", " ").replace(".", ",")
+    except Exception:
+        return "0,00 €"
 
-@app.context_processor
-def inject_now():
-    return {"now": datetime.utcnow()}
 
-# -------------------------------------------------------------------
+def ensure_schema_and_seed():
+    """
+    - Crée les tables manquantes.
+    - Ajoute les colonnes manquantes (ADD COLUMN IF NOT EXISTS) côté Postgres.
+    - Seed du catalogue COREFF si vide (ou si le couple name/volume n'existe pas).
+    """
+    with app.app_context():
+        # 1) Créer toutes les tables ORM manquantes
+        db.create_all()
+
+        # 2) Sécurité : si on est sur Postgres, on s'assure que les colonnes existent
+        if app.config["SQLALCHEMY_DATABASE_URI"].startswith("postgresql"):
+            from sqlalchemy import text
+            ddl = [
+                # products
+                "ALTER TABLE IF EXISTS products ADD COLUMN IF NOT EXISTS volume_l INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE IF EXISTS products ADD COLUMN IF NOT EXISTS price_cents INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE IF EXISTS products ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;",
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_product_name_volume') THEN "
+                "ALTER TABLE products ADD CONSTRAINT uq_product_name_volume UNIQUE (name, volume_l); END IF; END $$;",
+                # movements
+                "ALTER TABLE IF EXISTS movements ADD COLUMN IF NOT EXISTS unit_deposit_cents INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE IF EXISTS movements ADD COLUMN IF NOT EXISTS unit_price_cents INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE IF EXISTS movements ADD COLUMN IF NOT EXISTS note TEXT;",
+            ]
+            for stmt in ddl:
+                db.session.execute(text(stmt))
+            db.session.commit()
+
+        # 3) Seed catalogue COREFF
+        coreff_catalog = [
+            # ⚠️ Tu ajusteras prix/volumes si besoin. J’ai mis 22L car on l’a vu passer dans tes logs,
+            # et 30L qui est courant. Tu peux compléter à volonté.
+            {"name": "COREFF Blonde", "volumes": [22, 30], "price_cents": 0},
+            {"name": "COREFF Ambrée", "volumes": [22, 30], "price_cents": 0},
+            {"name": "COREFF Blanche", "volumes": [22], "price_cents": 0},
+            {"name": "COREFF IPA",     "volumes": [22], "price_cents": 0},
+        ]
+
+        created = 0
+        for item in coreff_catalog:
+            for vol in item["volumes"]:
+                exists = Product.query.filter_by(name=item["name"], volume_l=vol).first()
+                if not exists:
+                    p = Product(
+                        name=item["name"],
+                        volume_l=vol,
+                        price_cents=item.get("price_cents", 0),
+                        is_active=True,
+                    )
+                    db.session.add(p)
+                    created += 1
+        if created:
+            db.session.commit()
+            app.logger.info("Catalogue COREFF seedé : %s produits créés", created)
+
+
+# ------------------------------------------------------------------
 # Routes
-# -------------------------------------------------------------------
+# ------------------------------------------------------------------
 @app.route("/")
 def index():
-    try:
-        clients = Client.query.order_by(Client.name.asc()).all()
-    except Exception:
-        clients = []
-    return render_template("index.html", clients=clients)
+    ensure_schema_and_seed()
+    clients = Client.query.order_by(Client.name.asc()).all()
+    # On passe 'now' pour éviter l'erreur de template .strftime()
+    return render_template("index.html", clients=clients, now=datetime.utcnow())
+
 
 @app.route("/clients")
 def clients():
-    try:
-        clients = Client.query.order_by(Client.name.asc()).all()
-    except Exception:
-        clients = []
+    clients = Client.query.order_by(Client.name.asc()).all()
     return render_template("clients.html", clients=clients)
+
 
 @app.route("/clients/<int:client_id>")
 def client_detail(client_id: int):
-    try:
-        client = Client.query.get(client_id)
-    except Exception:
-        client = None
-    if not client:
-        abort(404)
-    return render_template("client_detail.html", client=client)
+    client = Client.query.get_or_404(client_id)
 
-# ✅ Stub pour éviter le 500 depuis client_detail.html
-@app.route("/clients/<int:client_id>/movements/add", methods=["POST"], endpoint="add_movement")
+    # Récup mouvements récents (si tu veux les afficher plus tard)
+    recent_movements = (
+        Movement.query.filter_by(client_id=client_id)
+        .order_by(Movement.created_at.desc())
+        .limit(20)
+        .all()
+    )
+
+    # Récap simple par produit (livraisons - reprises)
+    from sqlalchemy import func, case
+    balance_rows = (
+        db.session.query(
+            Product.name,
+            Product.volume_l,
+            func.sum(
+                case((Movement.type == "delivery", Movement.quantity), else_=0)
+            ).label("delivered"),
+            func.sum(
+                case((Movement.type == "pickup", Movement.quantity), else_=0)
+            ).label("picked"),
+        )
+        .join(Product, Product.id == Movement.product_id)
+        .filter(Movement.client_id == client_id)
+        .group_by(Product.name, Product.volume_l)
+        .all()
+    )
+
+    return render_template(
+        "client_detail.html",
+        client=client,
+        recent_movements=recent_movements,
+        balance_rows=balance_rows,
+    )
+
+
+# (Optionnel) API POST pour ajouter un mouvement — tu pourras brancher ton formulaire plus tard
+@app.post("/clients/<int:client_id>/movements")
 def add_movement(client_id: int):
-    # Pas de modèle Movement pour l’instant : on stabilise seulement le flux.
-    # On récupère les champs du formulaire si jamais ils existent déjà.
-    movement_type = request.form.get("movement_type", "").strip()  # "delivery" / "return"
-    note = request.form.get("note", "").strip()
+    """
+    Expects form fields:
+      - product_id (int)
+      - type ('delivery'|'pickup')
+      - quantity (int)
+      - unit_deposit_cents (int, optionnel)
+      - unit_price_cents   (int, optionnel)
+      - note (str, optionnel)
+    """
+    client = Client.query.get_or_404(client_id)
 
     try:
-        client = Client.query.get(client_id)
-    except Exception:
-        client = None
+        product_id = int(request.form.get("product_id", "0"))
+        move_type = request.form.get("type", "delivery")
+        qty = int(request.form.get("quantity", "0"))
 
-    if not client:
-        abort(404)
+        unit_deposit_cents = int(request.form.get("unit_deposit_cents", "0") or 0)
+        unit_price_cents = int(request.form.get("unit_price_cents", "0") or 0)
+        note = request.form.get("note") or None
 
-    flash("Saisie des livraisons & reprises — structure OK, logique BDD à venir.", "info")
-    # Quand on aura les modèles, on insérera ici et on redirigera pareil.
+        if move_type not in ("delivery", "pickup"):
+            raise ValueError("Type de mouvement invalide.")
+
+        if qty <= 0:
+            raise ValueError("La quantité doit être > 0.")
+
+        # Vérifie produit
+        product = Product.query.get(product_id)
+        if not product:
+            raise ValueError("Produit introuvable.")
+
+        m = Movement(
+            client_id=client.id,
+            product_id=product.id,
+            type=move_type,
+            quantity=qty,
+            unit_deposit_cents=unit_deposit_cents,
+            unit_price_cents=unit_price_cents,
+            note=note,
+        )
+        db.session.add(m)
+        db.session.commit()
+        flash("Mouvement enregistré ✅", "success")
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Erreur add_movement")
+        flash(f"Erreur: {e}", "danger")
+
     return redirect(url_for("client_detail", client_id=client.id))
 
-# Page catalogue neutre pour l’instant
-@app.route("/catalog", endpoint="catalog")
-def catalog_page():
-    return render_template("catalog.html")
 
-# -------------------------------------------------------------------
-# Lancement local : création des tables SQLite si besoin
-# -------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Entrypoint
+# ------------------------------------------------------------------
 if __name__ == "__main__":
-    parsed = urlparse(app.config["SQLALCHEMY_DATABASE_URI"])
-    if parsed.scheme.startswith("sqlite"):
-        with app.app_context():
-            db.create_all()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    with app.app_context():
+        ensure_schema_and_seed()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
