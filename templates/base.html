@@ -12,9 +12,21 @@
       <div class="container-fluid">
         <a class="navbar-brand" href="{{ url_for('index') }}">Suivi Fûts</a>
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-          <li class="nav-item"><a class="nav-link {% if request.endpoint=='index' %}active{% endif %}" href="{{ url_for('index') }}">Accueil</a></li>
-          <li class="nav-item"><a class="nav-link {% if request.endpoint in ['clients','client_detail'] %}active{% endif %}" href="{{ url_for('clients') }}">Clients</a></li>
-          <li class="nav-item"><a class="nav-link {% if request.endpoint=='catalog' %}active{% endif %}" href="{{ url_for('catalog') }}">Catalogue</a></li>
+          <li class="nav-item">
+            <a class="nav-link {% if request.endpoint=='index' %}active{% endif %}" href="{{ url_for('index') }}">
+              Accueil
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link {% if request.endpoint in ['clients','client_detail'] %}active{% endif %}" href="{{ url_for('clients') }}">
+              Clients
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link {% if request.endpoint in ['catalog', 'catalog.catalog_index'] %}active{% endif %}" href="{{ url_for('catalog') }}">
+              Catalogue
+            </a>
+          </li>
         </ul>
       </div>
     </nav>
