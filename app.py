@@ -2,167 +2,152 @@ import os
 from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, flash
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import text
-from dotenv import load_dotenv
 
-# Charger les variables d’environnement (.env sur Render)
-load_dotenv()
-
+# -------------------------
+# Configuration de l’application
+# -------------------------
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "dev")
+app.secret_key = os.getenv("SECRET_KEY", "dev_key")
 
-# Config BDD Postgres Render
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
+# Récupération et correction de l’URL de la base Render
+raw_db_url = os.getenv("DATABASE_URL")
+if not raw_db_url:
+    raise RuntimeError("DATABASE_URL manquant dans les variables d'environnement.")
+
+# Forcer psycopg v3 comme driver
+if raw_db_url.startswith("postgres://"):
+    db_url = raw_db_url.replace("postgres://", "postgresql+psycopg://", 1)
+elif raw_db_url.startswith("postgresql://") and "+psycopg" not in raw_db_url:
+    db_url = raw_db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+else:
+    db_url = raw_db_url
+
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
 
-# ---- Constante : montant de la consigne par fût ----
-DEPOSIT_CENTS_PER_KEG = 3000  # 30,00 €
-
-
-# =====================
-# Modèles SQLAlchemy
-# =====================
-
+# -------------------------
+# Modèles
+# -------------------------
 class Client(db.Model):
-    __tablename__ = "clients"
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
+    movements = db.relationship("Movement", backref="client", lazy=True)
 
 class Product(db.Model):
-    __tablename__ = "products"
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
-    volume_l = db.Column(db.Integer, nullable=False)  # ex: 22, 30
-    price_cents = db.Column(db.Integer, nullable=False, default=0)
+    volume_l = db.Column(db.Integer, nullable=False)  # Ex: 22 ou 30
+    price_cents = db.Column(db.Integer, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
 
-class KegMove(db.Model):
-    __tablename__ = "keg_moves"
+class Movement(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False)
-    product_id = db.Column(db.Integer, db.ForeignKey("products.id"), nullable=True)
-    qty_out = db.Column(db.Integer, default=0)     # fûts livrés
-    qty_in = db.Column(db.Integer, default=0)      # fûts repris
-    qty_defect = db.Column(db.Integer, default=0)  # fûts défectueux
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    client_id = db.Column(db.Integer, db.ForeignKey("client.id"), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
+    qty_in = db.Column(db.Integer, default=0)   # Livraisons
+    qty_out = db.Column(db.Integer, default=0)  # Reprises
+    defective = db.Column(db.Boolean, default=False)
+    date = db.Column(db.Date, default=datetime.utcnow)
+    product = db.relationship("Product")
 
-
-# =====================
-# Fonction utilitaire
-# =====================
-
-def client_keg_summary(client_id: int) -> dict:
-    """
-    Retourne un résumé des fûts pour un client :
-    - fûts livrés, repris, défectueux
-    - nombre actuel de fûts encore chez le client
-    - montant de consigne associé
-    """
-
-    res = db.session.execute(
-        text("""
-            SELECT
-                COALESCE(SUM(qty_out), 0)   AS qty_out_sum,
-                COALESCE(SUM(qty_in), 0)    AS qty_in_sum,
-                COALESCE(SUM(qty_defect),0) AS qty_def_sum
-            FROM keg_moves
-            WHERE client_id = :cid
-        """),
-        {"cid": client_id},
-    ).mappings().one()  # renvoie un dict accessible avec ["nom_colonne"]
-
-    qty_out = int(res["qty_out_sum"])
-    qty_in = int(res["qty_in_sum"])
-    qty_def = int(res["qty_def_sum"])
-
-    # Calcul du nombre de fûts actuels
-    current = max(qty_out - qty_in - qty_def, 0)
-
-    # Calcul de la consigne totale
-    deposit_cents = DEPOSIT_CENTS_PER_KEG * current
-
-    return {
-        "qty_out": qty_out,
-        "qty_in": qty_in,
-        "qty_defect": qty_def,
-        "current": current,
-        "deposit_cents": deposit_cents,
-    }
-
-
-# =====================
-# Routes principales
-# =====================
-
-@app.route("/")
-def index():
-    clients = Client.query.order_by(Client.name).all()
-
-    # Calcul du total des consignes théoriques
-    totals = {"deposit_cents": 0}
-    client_summaries = {}
-    for c in clients:
-        summary = client_keg_summary(c.id)
-        client_summaries[c.id] = summary
-        totals["deposit_cents"] += summary["deposit_cents"]
-
-    return render_template("index.html",
-                           clients=clients,
-                           summaries=client_summaries,
-                           totals=totals,
-                           now=datetime.now())
-
-
-@app.route("/clients")
-def clients():
-    clients = Client.query.order_by(Client.name).all()
-    return render_template("clients.html", clients=clients)
-
-
-@app.route("/clients/<int:client_id>")
-def client_detail(client_id):
-    client = Client.query.get_or_404(client_id)
-    moves = KegMove.query.filter_by(client_id=client.id).order_by(KegMove.created_at.desc()).all()
-    summary = client_keg_summary(client.id)
-    return render_template("client_detail.html",
-                           client=client,
-                           moves=moves,
-                           summary=summary)
-
-
-@app.route("/catalog")
-def catalog():
-    products = Product.query.filter_by(is_active=True).order_by(Product.name).all()
-    return render_template("catalog.html", products=products)
-
-
-# =====================
-# Création / initialisation de la base
-# =====================
-
-def ensure_schema():
-    """Crée les tables si elles n’existent pas encore"""
+# -------------------------
+# Initialisation DB + seed
+# -------------------------
+def ensure_schema_and_seed():
     with app.app_context():
         db.create_all()
 
+        # Catalogue initial
+        catalog = [
+            {"name": "COREFF Ambrée", "volumes": [22], "price_cents": 7800},
+            {"name": "COREFF Blanche", "volumes": [22], "price_cents": 7800},
+            {"name": "COREFF Rousse", "volumes": [22], "price_cents": 7800},
+            {"name": "COREFF Blonde", "volumes": [22, 30], "price_cents": 7800},
+            {"name": "Cidre Brut", "volumes": [22], "price_cents": 7800},
+        ]
 
-ensure_schema()
+        for item in catalog:
+            for v in item["volumes"]:
+                exists = Product.query.filter_by(name=item["name"], volume_l=v).first()
+                if not exists:
+                    db.session.add(Product(
+                        name=item["name"],
+                        volume_l=v,
+                        price_cents=item["price_cents"],
+                        is_active=True
+                    ))
+        db.session.commit()
 
+# -------------------------
+# Routes
+# -------------------------
+@app.route("/")
+def index():
+    clients = Client.query.all()
+    return render_template("index.html", clients=clients, now=datetime.now())
 
-# =====================
-# Filtre Jinja pour afficher en euros
-# =====================
+@app.route("/clients")
+def clients():
+    clients = Client.query.all()
+    return render_template("clients.html", clients=clients)
 
+@app.route("/client/<int:client_id>")
+def client_detail(client_id):
+    client = Client.query.get_or_404(client_id)
+    return render_template("client_detail.html", client=client)
+
+@app.route("/catalog")
+def catalog():
+    products = Product.query.filter_by(is_active=True).all()
+    return render_template("catalog.html", products=products)
+
+@app.route("/add_client", methods=["POST"])
+def add_client():
+    name = request.form.get("name")
+    if name:
+        db.session.add(Client(name=name))
+        db.session.commit()
+        flash(f"Client {name} ajouté.", "success")
+    return redirect(url_for("clients"))
+
+@app.route("/add_movement/<int:client_id>", methods=["POST"])
+def add_movement(client_id):
+    client = Client.query.get_or_404(client_id)
+    product_id = request.form.get("product_id")
+    qty_in = int(request.form.get("qty_in") or 0)
+    qty_out = int(request.form.get("qty_out") or 0)
+    defective = bool(request.form.get("defective"))
+    date = datetime.strptime(request.form.get("date"), "%Y-%m-%d")
+
+    if product_id and (qty_in or qty_out):
+        move = Movement(
+            client_id=client.id,
+            product_id=int(product_id),
+            qty_in=qty_in,
+            qty_out=qty_out,
+            defective=defective,
+            date=date
+        )
+        db.session.add(move)
+        db.session.commit()
+        flash("Mouvement enregistré.", "success")
+    else:
+        flash("Veuillez renseigner un produit et une quantité.", "danger")
+
+    return redirect(url_for("client_detail", client_id=client.id))
+
+# -------------------------
+# Filtres Jinja2
+# -------------------------
 @app.template_filter("eur")
-def eur(cents: int) -> str:
-    return f"{cents / 100:.2f} €"
+def format_eur(cents):
+    return f"{cents/100:.2f} €"
 
-
-# =====================
+# -------------------------
 # Lancement
-# =====================
-
+# -------------------------
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0")
+    ensure_schema_and_seed()
+    app.run(debug=True, host="0.0.0.0", port=5000)
