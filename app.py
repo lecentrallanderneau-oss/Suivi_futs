@@ -1,97 +1,45 @@
 import os
 from datetime import date
 from decimal import Decimal
-from dotenv import load_dotenv
 
-from flask import Flask, render_template_string, render_template, request, redirect, url_for, flash
-from flask_sqlalchemy import SQLAlchemy
+from dotenv import load_dotenv
+from flask import (
+    Flask, render_template_string, request, redirect, url_for, flash
+)
+
+# ⚠️ On importe la DB et les modèles depuis models.py
+from models import db, Client, KegMove, EquipMove
 from sqlalchemy import func
 
 # -----------------------------------------------------------------------------
-# Chargement env
+# App & configuration
 # -----------------------------------------------------------------------------
 load_dotenv()
 
-# -----------------------------------------------------------------------------
-# App & DB
-# -----------------------------------------------------------------------------
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///local.db")
-# Compatibilité Heroku/Render : "postgres://" -> "postgresql+psycopg://"
+# Compat Render/Heroku
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
 
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-db = SQLAlchemy(app)
+# ⚙️ on « branche » la DB du models.py sur cette app
+db.init_app(app)
 
-# -----------------------------------------------------------------------------
-# Modèles
-# -----------------------------------------------------------------------------
-class Client(db.Model):
-    __tablename__ = "clients"
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False, unique=True)
-    note = db.Column(db.Text, nullable=True)
-
-    # Pas de colonne "city" dans la BDD → on expose juste une propriété "douce"
-    @property
-    def city(self) -> str | None:
-        return None
-
-
-class KegMove(db.Model):
-    """
-    Mouvement de fûts.
-    - qty_out : fûts livrés (sortie de ton stock, vont chez le client, CONSIGNÉS)
-    - qty_in  : fûts repris (retour à ton stock, DÉCONSIGNÉS)
-    - qty_defect : fûts défectueux récupérés (déconsignent mais ne sont pas facturés)
-    """
-    __tablename__ = "keg_moves"
-    id = db.Column(db.Integer, primary_key=True)
-    client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False, index=True)
-    mov_date = db.Column(db.Date, nullable=False, default=date.today)
-
-    qty_out = db.Column(db.Integer, nullable=False, default=0)
-    qty_in = db.Column(db.Integer, nullable=False, default=0)
-    qty_defect = db.Column(db.Integer, nullable=False, default=0)
-
-    client = db.relationship("Client", backref=db.backref("keg_moves", lazy="dynamic"))
-
-
-class EquipMove(db.Model):
-    """
-    Mouvement de matériel (prêt / retour).
-    - label : libellé libre du matériel (ex: "Tirage 2 voies", "CO₂ 10kg", etc.)
-    - qty_out : prêté au client
-    - qty_in  : récupéré du client
-    """
-    __tablename__ = "equip_moves"
-    id = db.Column(db.Integer, primary_key=True)
-    client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False, index=True)
-    mov_date = db.Column(db.Date, nullable=False, default=date.today)
-
-    label = db.Column(db.String(160), nullable=False)
-    qty_out = db.Column(db.Integer, nullable=False, default=0)
-    qty_in = db.Column(db.Integer, nullable=False, default=0)
-
-    client = db.relationship("Client", backref=db.backref("equip_moves", lazy="dynamic"))
-
-
-# -----------------------------------------------------------------------------
-# Création des tables si absentes (pas de migration nécessaire)
-# -----------------------------------------------------------------------------
+# Création auto des tables si absentes
 with app.app_context():
     db.create_all()
 
 # -----------------------------------------------------------------------------
-# Filtres / helpers Jinja
+# Filtres / helpers
 # -----------------------------------------------------------------------------
 @app.template_filter("eur")
 def eur_filter(value):
+    """Affiche des centimes en euros (12345 -> 123,45 €)."""
     try:
         cents = int(Decimal(str(value)))
         return f"{Decimal(cents) / Decimal(100):.2f} €".replace(".", ",")
@@ -99,45 +47,46 @@ def eur_filter(value):
         return f"{value} €"
 
 def consigne_cents_for(qty_out: int, qty_in: int) -> int:
-    """
-    Consigne à 30€ par fût :
-    - On consigne à la LIVRAISON (qty_out)
-    - On DÉconsigne au RETOUR (qty_in)
-    - Les défectueux (qty_defect) déconsignent mais ne sont pas facturés → déjà
-      pris en compte car on ne les ajoute pas côté 'out', seulement côté 'in' si on veut.
-      Ici, on considère que qty_defect réduit le stock chez le client, pas la consigne.
-    """
+    """30 € par fût livré, -30 € par fût repris."""
     return (qty_out - qty_in) * 3000
 
-def client_keg_summary(client_id: int) -> dict:
-    """
-    Retourne :
-      - present_kegs : nb de fûts théoriquement chez le client
-      - consigne_cents : consigne en cours (30€ * (out - in))
-    """
-    agg = db.session.query(
-        func.coalesce(func.sum(KegMove.qty_out), 0),
-        func.coalesce(func.sum(KegMove.qty_in), 0),
-        func.coalesce(func.sum(KegMove.qty_defect), 0),
-    ).filter(KegMove.client_id == client_id).one()
 
-    out_total, in_total, defect_total = agg
+def client_keg_summary(client_id: int) -> dict:
+    """Synthèse fûts pour un client."""
+    out_total, in_total, defect_total = (
+        db.session.query(
+            func.coalesce(func.sum(KegMove.qty_out), 0),
+            func.coalesce(func.sum(KegMove.qty_in), 0),
+            func.coalesce(func.sum(KegMove.qty_defect), 0),
+        )
+        .filter(KegMove.client_id == client_id)
+        .one()
+    )
+
     present = (out_total or 0) - (in_total or 0) - (defect_total or 0)
     consigne = consigne_cents_for(out_total or 0, in_total or 0)
     return {"present_kegs": present, "consigne_cents": consigne}
 
+
 def client_equip_summary(client_id: int) -> list[tuple[str, int]]:
-    """
-    Retourne une liste [(label, qty_en_pret), ...] > 0
-    """
+    """Liste (label, quantité en prêt > 0)."""
     rows = (
         db.session.query(
             EquipMove.label,
-            (func.coalesce(func.sum(EquipMove.qty_out), 0) - func.coalesce(func.sum(EquipMove.qty_in), 0)).label("bal")
+            (
+                func.coalesce(func.sum(EquipMove.qty_out), 0)
+                - func.coalesce(func.sum(EquipMove.qty_in), 0)
+            ).label("bal")
         )
         .filter(EquipMove.client_id == client_id)
         .group_by(EquipMove.label)
-        .having((func.coalesce(func.sum(EquipMove.qty_out), 0) - func.coalesce(func.sum(EquipMove.qty_in), 0)) > 0)
+        .having(
+            (
+                func.coalesce(func.sum(EquipMove.qty_out), 0)
+                - func.coalesce(func.sum(EquipMove.qty_in), 0)
+            )
+            > 0
+        )
         .order_by(EquipMove.label.asc())
         .all()
     )
@@ -148,7 +97,7 @@ def client_equip_summary(client_id: int) -> list[tuple[str, int]]:
 # -----------------------------------------------------------------------------
 @app.route("/")
 def index():
-    """Tableau de bord : liste clients + récap rapide (fûts présents, consigne, matériel)."""
+    """Liste clients + résumé global (starter minimal garanti)."""
     clients = Client.query.order_by(Client.name.asc()).all()
 
     cards: list[dict] = []
@@ -170,7 +119,7 @@ def index():
                 "name": c.name,
                 "kegs": keg["present_kegs"],
                 "consigne_cents": keg["consigne_cents"],
-                "equip": equip,  # liste (label, qty)
+                "equip": equip,
             }
         )
 
@@ -180,7 +129,7 @@ def index():
         "equip": total_equip,
     }
 
-    # Template minimal intégré pour garantir le déploiement (tu peux remplacer par templates/*.html si tu préfères)
+    # Template inline (tu pourras passer à des fichiers templates plus tard)
     tpl = """
     <!doctype html>
     <html lang="fr">
@@ -196,28 +145,22 @@ def index():
 
       <div class="row g-3 mb-4">
         <div class="col-md-4">
-          <div class="card border-0 shadow-sm">
-            <div class="card-body">
-              <div class="text-muted">Fûts chez clients</div>
-              <div class="fs-3">{{ totals.kegs or 0 }}</div>
-            </div>
-          </div>
+          <div class="card border-0 shadow-sm"><div class="card-body">
+            <div class="text-muted">Fûts chez clients</div>
+            <div class="fs-3">{{ totals.kegs or 0 }}</div>
+          </div></div>
         </div>
         <div class="col-md-4">
-          <div class="card border-0 shadow-sm">
-            <div class="card-body">
-              <div class="text-muted">Consigne en cours</div>
-              <div class="fs-3">{{ (totals.consigne_cents or 0)|eur }}</div>
-            </div>
-          </div>
+          <div class="card border-0 shadow-sm"><div class="card-body">
+            <div class="text-muted">Consigne en cours</div>
+            <div class="fs-3">{{ (totals.consigne_cents or 0)|eur }}</div>
+          </div></div>
         </div>
         <div class="col-md-4">
-          <div class="card border-0 shadow-sm">
-            <div class="card-body">
-              <div class="text-muted">Matériel en prêt</div>
-              <div class="fs-3">{{ totals.equip or 0 }}</div>
-            </div>
-          </div>
+          <div class="card border-0 shadow-sm"><div class="card-body">
+            <div class="text-muted">Matériel en prêt</div>
+            <div class="fs-3">{{ totals.equip or 0 }}</div>
+          </div></div>
         </div>
       </div>
 
@@ -234,14 +177,12 @@ def index():
             <h5 class="mb-1">{{ c.name }}</h5>
             <small class="text-muted">Consigne: {{ (c.consigne_cents or 0)|eur }}</small>
           </div>
-          <p class="mb-1">Fûts: {{ c.kegs or 0 }} • Matériel: 
+          <p class="mb-1">Fûts: {{ c.kegs or 0 }} • Matériel:
             {% if c.equip %}
               {% for label, q in c.equip %}
                 <span class="badge text-bg-secondary me-1">{{ label }} × {{ q }}</span>
               {% endfor %}
-            {% else %}
-              Aucun
-            {% endif %}
+            {% else %}Aucun{% endif %}
           </p>
         </a>
         {% endfor %}
@@ -448,7 +389,6 @@ def client_detail(client_id: int):
 def movement_new(client_id: int):
     Client.query.get_or_404(client_id)
 
-    # Kegs
     mov_date_str = request.form.get("mov_date") or date.today().isoformat()
     try:
         y, m, d = [int(x) for x in mov_date_str.split("-")]
@@ -456,22 +396,35 @@ def movement_new(client_id: int):
     except Exception:
         mov_date = date.today()
 
+    # Fûts
     qty_out = int(request.form.get("qty_out") or 0)
     qty_in = int(request.form.get("qty_in") or 0)
     qty_defect = int(request.form.get("qty_defect") or 0)
-
     if qty_out or qty_in or qty_defect:
-        db.session.add(KegMove(client_id=client_id, mov_date=mov_date,
-                               qty_out=qty_out, qty_in=qty_in, qty_defect=qty_defect))
+        db.session.add(
+            KegMove(
+                client_id=client_id,
+                mov_date=mov_date,
+                qty_out=qty_out,
+                qty_in=qty_in,
+                qty_defect=qty_defect,
+            )
+        )
 
-    # Equip
+    # Matériel
     equip_label = (request.form.get("equip_label") or "").strip()
     equip_out = int(request.form.get("equip_out") or 0)
     equip_in = int(request.form.get("equip_in") or 0)
-
     if equip_label and (equip_out or equip_in):
-        db.session.add(EquipMove(client_id=client_id, mov_date=mov_date,
-                                 label=equip_label, qty_out=equip_out, qty_in=equip_in))
+        db.session.add(
+            EquipMove(
+                client_id=client_id,
+                mov_date=mov_date,
+                label=equip_label,
+                qty_out=equip_out,
+                qty_in=equip_in,
+            )
+        )
 
     db.session.commit()
     flash("Mouvement enregistré.", "success")
