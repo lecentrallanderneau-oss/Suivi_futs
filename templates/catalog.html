@@ -1,54 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="d-flex align-items-center justify-content-between mb-3">
-  <h1 class="h3 m-0">Catalogue</h1>
-</div>
-
-<div class="card">
-  <div class="card-body">
-    {% if products %}
-    <div class="table-responsive">
-      <table class="table align-middle">
-        <thead>
-          <tr>
-            <th>Produit</th>
-            <th>Volume</th>
-            <th>Prix</th>
-            <th>Actif</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for p in products %}
-          <tr>
-            <td>{{ p.name }}</td>
-            <td>{{ p.volume_l }} L</td>
-            <td>{{ p.price_cents|eur }}</td>
-            <td>
-              {% if p.is_active %}
-                <span class="badge text-bg-success">Oui</span>
-              {% else %}
-                <span class="badge text-bg-secondary">Non</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% else %}
-      <p class="mb-0 text-muted">Aucun produit dans le catalogue.</p>
-    {% endif %}
+  <h1 class="h4 mb-3">Catalogue</h1>
+  <div class="alert alert-secondary">
+    Structure prête ✅. On branchera ici ton vrai catalogue (produits, volumes, prix, règles COREFF, etc.)
+    dès que le schéma BDD est validé.
   </div>
-</div>
-
-<div class="alert alert-info mt-3">
-  <div class="fw-bold mb-1">Rappels de disponibilité</div>
-  <ul class="mb-0">
-    <li>COREFF Ambrée : <strong>22 L uniquement</strong></li>
-    <li>COREFF Blanche : <strong>22 L uniquement</strong></li>
-    <li>COREFF Rousse : <strong>22 L uniquement</strong></li>
-    <li>COREFF Blonde : <strong>22 L et 30 L</strong></li>
-    <li>Cidre Brut : <strong>22 L uniquement</strong></li>
-  </ul>
-</div>
 {% endblock %}
