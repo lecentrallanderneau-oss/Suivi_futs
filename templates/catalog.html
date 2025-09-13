@@ -1,5 +1,70 @@
 {% extends "base.html" %}
 {% block content %}
-<h1 class="h4">Catalogue (placeholder)</h1>
-<p>Vous pourrez gérer ici vos références de boissons et matériel plus tard.</p>
+<h1 class="h3 mb-3">Catalogue</h1>
+
+<div class="card mb-4">
+  <div class="card-header">Ajouter / modifier un produit</div>
+  <div class="card-body">
+    <form method="post" class="row g-2 align-items-end">
+      <div class="col-md-4">
+        <label class="form-label">Nom</label>
+        <input type="text" name="name" class="form-control" placeholder="COREFF Ambrée" required>
+        <div class="form-text">Ex: COREFF Ambrée, COREFF Blanche, Cidre…</div>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">Volume (L)</label>
+        <input type="number" min="1" step="1" name="volume_l" class="form-control" placeholder="22" required>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">Prix (€/fût)</label>
+        <input type="text" name="price_eur" class="form-control" placeholder="78,00">
+        <div class="form-text">Optionnel (ex: 78 ou 78,00)</div>
+      </div>
+      <div class="col-md-2">
+        <div class="form-check mt-4">
+          <input class="form-check-input" type="checkbox" id="is_active" name="is_active" checked>
+          <label class="form-check-label" for="is_active">Actif</label>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-primary w-100">Enregistrer</button>
+      </div>
+    </form>
+    <div class="mt-2 text-muted small">
+      Règles: Ambrée uniquement 22 L — Blanche/Rousse/Cidre: pas de 30 L.
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Produits</div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th>Nom</th>
+            <th class="text-center">Volume</th>
+            <th class="text-end">Prix</th>
+            <th class="text-center">Actif</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in products %}
+          <tr>
+            <td>{{ p.name }}</td>
+            <td class="text-center">{{ p.volume_l }} L</td>
+            <td class="text-end">{{ p.price_cents|eur }}</td>
+            <td class="text-center">
+              {% if p.is_active %}<span class="badge text-bg-success">Oui</span>{% else %}<span class="badge text-bg-secondary">Non</span>{% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" class="text-center text-muted py-4">Aucun produit.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
 {% endblock %}
