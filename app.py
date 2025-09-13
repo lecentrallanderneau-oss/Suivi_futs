@@ -1,35 +1,37 @@
-import os
+# app.py
+from __future__ import annotations
 from datetime import datetime, date
+import os
 
 from flask import Flask, render_template, request, redirect, url_for, flash
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import text, inspect
+from sqlalchemy import inspect, text
 
-# ------------------------------------------------------------
-# Flask + DB config
-# ------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Config & initialisation
+# -----------------------------------------------------------------------------
+def _normalize_db_url(url: str | None) -> str:
+    """Assure l’usage du driver psycopg (v3) et un fallback SQLite en local."""
+    if not url:
+        return "sqlite:///local.db"
+    # Render/Heroku fournissent parfois postgres:// -> on bascule vers postgresql+psycopg://
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url.split("://", 1)[1]
+    if url.startswith("postgresql://") and "+psycopg" not in url:
+        return "postgresql+psycopg://" + url.split("://", 1)[1]
+    return url
+
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
-
-db_url = os.environ.get("DATABASE_URL", "sqlite:///local.db")
-
-# Render / Heroku / autres : uniformiser l'URL pour psycopg v3
-if db_url.startswith("postgres://"):
-    # ancien prefix -> forcer driver psycopg v3
-    db_url = "postgresql+psycopg://" + db_url.split("://", 1)[1]
-elif db_url.startswith("postgresql://") and "+psycopg" not in db_url:
-    # déjà 'postgresql://' mais sans préciser le driver -> ajouter '+psycopg'
-    db_url = "postgresql+psycopg://" + db_url.split("://", 1)[1]
-
-app.config["SQLALCHEMY_DATABASE_URI"] = db_url
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret")
+app.config["SQLALCHEMY_DATABASE_URI"] = _normalize_db_url(os.environ.get("DATABASE_URL"))
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 
 db = SQLAlchemy(app)
 
-# ------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Modèles
-# ------------------------------------------------------------
+# -----------------------------------------------------------------------------
 class Client(db.Model):
     __tablename__ = "clients"
     id = db.Column(db.Integer, primary_key=True)
@@ -39,15 +41,14 @@ class Client(db.Model):
         "Movement", backref="client", lazy="dynamic", cascade="all, delete-orphan"
     )
 
-    def __repr__(self) -> str:
+    def __repr__(self):
         return f"<Client {self.name}>"
-
 
 class Product(db.Model):
     __tablename__ = "products"
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(255), nullable=False)              # ex : "COREFF Ambrée"
-    volume_l = db.Column(db.Integer, nullable=False, default=22)  # 22 ou 30
+    name = db.Column(db.String(255), nullable=False)               # ex: "COREFF Ambrée"
+    volume_l = db.Column(db.Integer, nullable=False, default=22)   # 22 ou 30
     price_cents = db.Column(db.Integer, nullable=False, default=0)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
 
@@ -55,9 +56,8 @@ class Product(db.Model):
         db.UniqueConstraint("name", "volume_l", name="uq_product_name_volume"),
     )
 
-    def __repr__(self) -> str:
+    def __repr__(self):
         return f"<Product {self.name} {self.volume_l}L {self.price_cents/100:.2f}€>"
-
 
 class Movement(db.Model):
     __tablename__ = "movements"
@@ -65,111 +65,135 @@ class Movement(db.Model):
     date = db.Column(db.Date, nullable=False, default=date.today)
     client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False)
     product_id = db.Column(db.Integer, db.ForeignKey("products.id"), nullable=False)
-    qty_in = db.Column(db.Integer, nullable=False, default=0)   # livrés
-    qty_out = db.Column(db.Integer, nullable=False, default=0)  # repris
+    qty_in = db.Column(db.Integer, nullable=False, default=0)    # livrés
+    qty_out = db.Column(db.Integer, nullable=False, default=0)   # repris
     defective = db.Column(db.Boolean, nullable=False, default=False)
 
     product = db.relationship("Product")
 
-    def __repr__(self) -> str:
+    def __repr__(self):
         return (f"<Movement {self.date} C{self.client_id} P{self.product_id} "
                 f"+{self.qty_in} -{self.qty_out}{' DEF' if self.defective else ''}>")
 
+# -----------------------------------------------------------------------------
+# Mise à niveau du schéma existant (safe sur Postgres & SQLite)
+# -----------------------------------------------------------------------------
+_schema_done = False
 
-# ------------------------------------------------------------
-# Jinja helpers
-# ------------------------------------------------------------
+def ensure_schema():
+    """
+    - Crée toutes les tables si absentes
+    - Ajoute les colonnes manquantes dans 'products' (volume_l, price_cents, is_active)
+    - Ajoute la contrainte d'unicité (name, volume_l) si absente
+    """
+    db.create_all()
+
+    insp = inspect(db.engine)
+    # 1) Colonnes manquantes
+    if insp.has_table("products"):
+        cols = {c["name"] for c in insp.get_columns("products")}
+        alter_sqls = []
+
+        if "volume_l" not in cols:
+            # DEFAULT 22 NOT NULL
+            alter_sqls.append(
+                "ALTER TABLE products ADD COLUMN IF NOT EXISTS volume_l INTEGER DEFAULT 22 NOT NULL"
+            )
+        if "price_cents" not in cols:
+            alter_sqls.append(
+                "ALTER TABLE products ADD COLUMN IF NOT EXISTS price_cents INTEGER DEFAULT 0 NOT NULL"
+            )
+        if "is_active" not in cols:
+            alter_sqls.append(
+                "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE NOT NULL"
+            )
+
+        if alter_sqls:
+            with db.engine.begin() as conn:
+                for sql in alter_sqls:
+                    conn.execute(text(sql))
+
+        # 2) Contrainte d'unicité name+volume_l
+        # Vérifie si la contrainte existe déjà
+        existing_uks = set()
+        try:
+            for uk in insp.get_unique_constraints("products"):
+                name = uk.get("name")
+                if name:
+                    existing_uks.add(name)
+        except Exception:
+            pass
+
+        if "uq_product_name_volume" not in existing_uks:
+            # On vérifie aussi côté catalogue système (au cas où le nom diffère)
+            # et on ne crée que si non présente.
+            with db.engine.begin() as conn:
+                # Sur certaines versions de PG, IF NOT EXISTS n'est pas dispo pour ADD CONSTRAINT.
+                # On protège en testant la présence logique (via pg_constraint) puis création.
+                conn.execute(text("""
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        WHERE rel.relname = 'products' AND con.conname = 'uq_product_name_volume'
+    ) THEN
+        ALTER TABLE products
+        ADD CONSTRAINT uq_product_name_volume UNIQUE (name, volume_l);
+    END IF;
+END $$;
+"""))
+
+def ensure_schema_once():
+    global _schema_done
+    if not _schema_done:
+        ensure_schema()
+        _schema_done = True
+
+# -----------------------------------------------------------------------------
+# Filtres & contextes Jinja
+# -----------------------------------------------------------------------------
 @app.template_filter("eur")
-def as_eur(cents: int) -> str:
+def jinja_eur(cents):
     try:
         cents = int(cents or 0)
     except Exception:
         cents = 0
     euros = cents / 100.0
-    # format FR : 1 234,56 €
+    # format fr : espace comme séparateur milliers, virgule comme décimale
     return f"{euros:,.2f} €".replace(",", "X").replace(".", ",").replace("X", " ")
 
 @app.context_processor
 def inject_now():
     return {"now": datetime.utcnow}
 
-# ------------------------------------------------------------
-# Schéma + Seed catalogue
-# ------------------------------------------------------------
-def ensure_schema_and_seed():
-    # Crée les tables si absentes
-    db.create_all()
-
-    # Ajoute la colonne volume_l si le schéma est ancien
-    insp = inspect(db.engine)
-    if insp.has_table("products"):
-        cols = {c["name"] for c in insp.get_columns("products")}
-        if "volume_l" not in cols:
-            with db.engine.begin() as conn:
-                conn.execute(text(
-                    "ALTER TABLE products "
-                    "ADD COLUMN IF NOT EXISTS volume_l INTEGER DEFAULT 22 NOT NULL;"
-                ))
-
-    # Seed catalogue (idempotent)
-    seed_items = [
-        {"name": "COREFF Blonde",  "volumes": {22: 0, 30: 0}, "active": True},
-        {"name": "COREFF Ambrée",  "volumes": {22: 7800},     "active": True},  # 78 €
-        {"name": "COREFF Blanche", "volumes": {22: 0},        "active": True},  # pas de 30L
-        {"name": "COREFF Rousse",  "volumes": {22: 0},        "active": True},  # pas de 30L
-        {"name": "Cidre Brut",     "volumes": {22: 0},        "active": True},  # pas de 30L
-    ]
-
-    changed = False
-    for item in seed_items:
-        for vol, price in item["volumes"].items():
-            p = Product.query.filter_by(name=item["name"], volume_l=vol).first()
-            if p:
-                if (p.price_cents != price) or (p.is_active != item["active"]):
-                    p.price_cents = price
-                    p.is_active = item["active"]
-                    db.session.add(p)
-                    changed = True
-            else:
-                db.session.add(Product(
-                    name=item["name"], volume_l=vol,
-                    price_cents=price, is_active=item["active"]
-                ))
-                changed = True
-    if changed:
-        db.session.commit()
-
-# ------------------------------------------------------------
-# Règles volumes autorisés
-# ------------------------------------------------------------
-def is_volume_allowed(product_name: str, volume_l: int) -> bool:
-    name = (product_name or "").strip().lower()
-    if "ambrée" in name:
-        return volume_l == 22
-    if "blanche" in name:
-        return volume_l == 22
-    if "rousse" in name:
-        return volume_l == 22
-    if "cidre" in name:
-        return volume_l == 22
-    # Blonde : 22 et 30 autorisés
-    return True
-
-# ------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Routes
-# ------------------------------------------------------------
+# -----------------------------------------------------------------------------
+@app.before_request
+def _before_any_request():
+    # garantit que le schéma est OK avant toute requête (évite l'erreur UndefinedColumn)
+    ensure_schema_once()
+
 @app.route("/")
 def index():
-    ensure_schema_and_seed()
     clients = Client.query.order_by(Client.name.asc()).all()
-    return render_template("index.html", clients=clients, now=datetime.now())
+    return render_template("index.html", clients=clients)
 
-@app.route("/clients")
+# --- Catalogue (lecture) ---
+@app.route("/catalog")
+def catalog():
+    products = Product.query.order_by(Product.name.asc(), Product.volume_l.asc()).all()
+    return render_template("catalog.html", products=products)
+
+# --- Clients : liste + création ---
+@app.get("/clients")
 def clients():
-    clients = Client.query.order_by(Client.name.asc()).all()
-    return render_template("clients.html", clients=clients)
+    clis = Client.query.order_by(Client.name.asc()).all()
+    return render_template("clients.html", clients=clis)
 
-@app.route("/clients/add", methods=["POST"])
+@app.post("/clients/add")
 def add_client():
     name = (request.form.get("name") or "").strip()
     if not name:
@@ -183,7 +207,8 @@ def add_client():
     flash("Client ajouté.", "success")
     return redirect(url_for("clients"))
 
-@app.route("/client/<int:client_id>")
+# --- Détail client + saisie mouvements ---
+@app.get("/clients/<int:client_id>")
 def client_detail(client_id: int):
     client = Client.query.get_or_404(client_id)
     moves = (
@@ -197,16 +222,21 @@ def client_detail(client_id: int):
     return render_template("client_detail.html",
                            client=client, movements=moves, products=products)
 
-@app.route("/client/<int:client_id>/movements/add", methods=["POST"])
+@app.post("/clients/<int:client_id>/movements/add")
 def add_movement(client_id: int):
     client = Client.query.get_or_404(client_id)
 
-    # date
+    # Date
     date_raw = request.form.get("date")
-    move_date = (datetime.strptime(date_raw, "%Y-%m-%d").date()
-                 if date_raw else datetime.utcnow().date())
+    if date_raw:
+        try:
+            move_date = datetime.strptime(date_raw, "%Y-%m-%d").date()
+        except Exception:
+            move_date = datetime.utcnow().date()
+    else:
+        move_date = datetime.utcnow().date()
 
-    # produit
+    # Produit
     try:
         product_id = int(request.form.get("product_id"))
     except Exception:
@@ -218,11 +248,7 @@ def add_movement(client_id: int):
         flash("Produit introuvable ou inactif.", "danger")
         return redirect(url_for("client_detail", client_id=client.id))
 
-    # règle volume
-    if not is_volume_allowed(product.name, product.volume_l):
-        flash(f"Volume non autorisé pour {product.name}.", "danger")
-        return redirect(url_for("client_detail", client_id=client.id))
-
+    # Quantités (toujours positives)
     def to_int(v):
         try:
             return int(v or 0)
@@ -250,14 +276,20 @@ def add_movement(client_id: int):
     flash("Mouvement enregistré.", "success")
     return redirect(url_for("client_detail", client_id=client.id))
 
-@app.route("/catalog")
-def catalog():
-    products = Product.query.order_by(Product.name.asc(), Product.volume_l.asc()).all()
-    return render_template("catalog.html", products=products)
+# -----------------------------------------------------------------------------
+# Templates minimaux (si tu as déjà tes fichiers, garde-les)
+# -----------------------------------------------------------------------------
+# NOTE: Ce code suppose que tu as déjà :
+# templates/base.html, templates/index.html, templates/clients.html,
+# templates/client_detail.html, templates/catalog.html
+# (Ce sont ceux que nous avons échangés plus tôt.)
 
-# ------------------------------------------------------------
-# Main (dev local)
-# ------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Point d’entrée gunicorn
+# -----------------------------------------------------------------------------
+# Sur Render : Start command = `gunicorn app:app`
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    ensure_schema_and_seed()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
+    # Exécution locale : python app.py
+    app.run(host="0.0.0.0", port=5000, debug=True)
