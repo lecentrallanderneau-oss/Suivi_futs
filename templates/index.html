@@ -1,21 +1,36 @@
 {% extends "base.html" %}
 {% block content %}
-  <div class="d-flex align-items-center justify-content-between mb-3">
-    <h1 class="h4 m-0">Accueil</h1>
-    <span class="ms-3 text-muted">Dernière mise à jour : {{ now.strftime("%d/%m/%Y %H:%M") }}</span>
-  </div>
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h1 class="h4 m-0">Clients</h1>
+  <a class="btn btn-primary" href="{{ url_for('new_client') }}">Ajouter un client</a>
+</div>
 
-  {% if clients and clients|length %}
-    <div class="list-group">
-      {% for c in clients %}
-        <a href="{{ url_for('client_detail', client_id=c.id) }}" class="list-group-item list-group-item-action">
-          {{ c.name }}
-        </a>
-      {% endfor %}
-    </div>
-  {% else %}
-    <div class="alert alert-info">
-      Aucun client pour le moment. Ajoute des clients dans la base quand tu veux.
-    </div>
-  {% endif %}
+<div class="table-responsive">
+  <table class="table table-sm align-middle">
+    <thead>
+      <tr>
+        <th>Nom</th>
+        <th>Contact</th>
+        <th class="text-end">Stock (fûts)</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in clients %}
+      <tr>
+        <td><a href="{{ url_for('client_detail', client_id=c.id) }}" class="text-decoration-none">{{ c.name }}</a></td>
+        <td>{{ c.contact or "—" }}</td>
+        <td class="text-end fw-semibold">{{ stocks[c.id] }}</td>
+        <td class="text-end">
+          <form method="post" action="{{ url_for('delete_client', client_id=c.id) }}" onsubmit="return confirm('Supprimer {{ c.name }} ? Cette action est définitive.');">
+            <button class="btn btn-sm btn-outline-danger">Supprimer</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="text-center text-muted">Aucun client pour l’instant.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% endblock %}
