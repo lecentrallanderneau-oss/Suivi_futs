@@ -4,20 +4,39 @@ from flask import Flask, render_template, request, redirect, url_for, flash
 from flask_sqlalchemy import SQLAlchemy
 
 # ---------------------------------------------------------------------
-# App & Config
+# Config DB (normalisation Render -> SQLAlchemy psycopg v3)
 # ---------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Si tu veux passer sur Postgres plus tard, mets DATABASE_URL dans Render.
-# Sinon, SQLite local par défaut (fichier dans le dossier de l’app).
-DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL:
-    # Compat Render / SQLAlchemy
-    # ex: postgres:// -> postgresql+psycopg://
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://")
-else:
-    DATABASE_URL = "sqlite:///" + os.path.join(BASE_DIR, "suivi_futs.db")
+def normalize_db_url(url: str | None) -> str:
+    """
+    Convertit toutes les variantes Render/Heroku en URL explicite psycopg v3.
+    - postgres://...                -> postgresql+psycopg://...
+    - postgresql://... (sans driver) -> postgresql+psycopg://...
+    Laisse inchangé si déjà 'postgresql+psycopg://'.
+    """
+    if not url or url.strip() == "":
+        return "sqlite:///" + os.path.join(BASE_DIR, "suivi_futs.db")
 
+    url = url.strip()
+
+    if url.startswith("postgresql+psycopg://"):
+        return url
+
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+psycopg://", 1)
+
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+    # fallback : renvoie tel quel (utile pour sqlite:/// ou autres)
+    return url
+
+DATABASE_URL = normalize_db_url(os.getenv("DATABASE_URL"))
+
+# ---------------------------------------------------------------------
+# App Flask
+# ---------------------------------------------------------------------
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev")
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
@@ -26,13 +45,15 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
 # ---------------------------------------------------------------------
-# Models
+# Modèles
 # ---------------------------------------------------------------------
 class Client(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
     contact = db.Column(db.String(120), nullable=True)
-    movements = db.relationship("Movement", backref="client", lazy=True, cascade="all, delete-orphan")
+    movements = db.relationship(
+        "Movement", backref="client", lazy=True, cascade="all, delete-orphan"
+    )
 
 class Movement(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -43,34 +64,27 @@ class Movement(db.Model):
     date = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 # ---------------------------------------------------------------------
-# Template helpers
+# Helpers template
 # ---------------------------------------------------------------------
 @app.context_processor
 def inject_now():
-    # Permet d'utiliser {{ now.strftime("%d/%m/%Y %H:%M") }} dans tous les templates
     return {"now": datetime.utcnow()}
 
 # ---------------------------------------------------------------------
-# DB init (important pour Render/Gunicorn)
+# Init DB au démarrage (Gunicorn compris)
 # ---------------------------------------------------------------------
 def ensure_db():
-    """Crée les tables si elles n'existent pas et seed minimal si vide."""
     db.create_all()
-
-    # Seed léger si aucun client, pour éviter une page vide au 1er chargement
     if Client.query.count() == 0:
         c1 = Client(name="Client Démo", contact="demo@example.com")
         db.session.add(c1)
-        db.session.flush()  # pour avoir c1.id
-
-        demo_movs = [
+        db.session.flush()
+        db.session.add_all([
             Movement(client_id=c1.id, product="Fût COREFF Blonde 20L", quantity=5, type="livraison"),
             Movement(client_id=c1.id, product="Fût COREFF Blonde 20L", quantity=2, type="reprise"),
-        ]
-        db.session.add_all(demo_movs)
+        ])
         db.session.commit()
 
-# Appelé au chargement du module (et donc au démarrage Gunicorn)
 with app.app_context():
     ensure_db()
 
@@ -90,10 +104,9 @@ def client_detail(client_id):
 @app.route("/clients/<int:client_id>/add_movement", methods=["POST"])
 def add_movement(client_id):
     client = Client.query.get_or_404(client_id)
-
     product = (request.form.get("product") or "").strip()
     quantity = int(request.form.get("quantity") or 0)
-    mov_type = (request.form.get("type") or "").strip()  # "livraison" ou "reprise"
+    mov_type = (request.form.get("type") or "").strip()  # "livraison" | "reprise"
 
     if not product or quantity <= 0 or mov_type not in ("livraison", "reprise"):
         flash("Vérifie le produit, la quantité (>0) et le type (livraison/reprise).", "danger")
