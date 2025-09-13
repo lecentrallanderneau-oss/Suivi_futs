@@ -1,444 +1,336 @@
 import os
-from datetime import date
+from datetime import datetime
 from decimal import Decimal
+from flask import Flask, render_template, request, redirect, url_for, flash
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import inspect, text
 
-from dotenv import load_dotenv
-from flask import (
-    Flask, render_template_string, request, redirect, url_for, flash
-)
-from sqlalchemy import func, text
-
-# 👉 on importe la DB et les modèles définis dans models.py
-from models import db, Client, KegMove, EquipMove
-
-# -----------------------------------------------------------------------------
-# App & configuration
-# -----------------------------------------------------------------------------
-load_dotenv()
-
+# ----------------------------------------------------------------------------
+# App & DB
+# ----------------------------------------------------------------------------
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///local.db")
-# Compat Heroku/Render
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
-
-app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev")
+db_url = os.environ.get("DATABASE_URL") or "sqlite:///local.db"
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db = SQLAlchemy(app)
 
-db.init_app(app)
+# ----------------------------------------------------------------------------
+# MODELS (minimal for starter; will be ignored if real models.py is present)
+# ----------------------------------------------------------------------------
+# We try to import your project models if they exist.
+try:
+    from models import db as ext_db  # type: ignore
+    db = ext_db  # type: ignore[assignment]
+    from models import Client, KegMove, EquipMove  # type: ignore
+except Exception:
+    class Client(db.Model):  # type: ignore
+        __tablename__ = "clients"
+        id = db.Column(db.Integer, primary_key=True)
+        name = db.Column(db.String(120), nullable=False, unique=True)
+        note = db.Column(db.Text, nullable=True)
+        created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
-# -----------------------------------------------------------------------------
-# Création des tables + garde-fous de schéma (ajout colonne manquante)
-# -----------------------------------------------------------------------------
-with app.app_context():
-    db.create_all()
+    class KegMove(db.Model):  # type: ignore
+        __tablename__ = "keg_moves"
+        id = db.Column(db.Integer, primary_key=True)
+        client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False)
+        created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+        qty_out = db.Column(db.Integer, default=0, nullable=False)     # fûts livrés
+        qty_in = db.Column(db.Integer, default=0, nullable=False)      # fûts repris
+        qty_defect = db.Column(db.Integer, default=0, nullable=False)  # fûts défectueux
+        note = db.Column(db.Text)
 
-    # Si Postgres côté Render n’a pas la colonne clients.note, on l’ajoute.
-    try:
-        if db.engine.url.get_backend_name().startswith("postgresql"):
-            db.session.execute(text("ALTER TABLE clients ADD COLUMN IF NOT EXISTS note TEXT"))
-            db.session.commit()
-    except Exception as e:
-        # On ne casse pas le boot si l'ALTER n'est pas supporté ; on loggue juste.
-        app.logger.warning(f"Schema check warning: {e}")
+    class EquipMove(db.Model):  # type: ignore
+        __tablename__ = "equip_moves"
+        id = db.Column(db.Integer, primary_key=True)
+        client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False)
+        created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+        equip_name = db.Column(db.String(120), nullable=False)
+        qty_out = db.Column(db.Integer, default=0, nullable=False)
+        qty_in = db.Column(db.Integer, default=0, nullable=False)
+        note = db.Column(db.Text)
 
-# -----------------------------------------------------------------------------
-# Filtres / helpers
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Jinja filters
+# ----------------------------------------------------------------------------
 @app.template_filter("eur")
-def eur_filter(value):
+def eur(v):
     try:
-        cents = int(Decimal(str(value)))
-        return f"{Decimal(cents) / Decimal(100):.2f} €".replace(".", ",")
+        q = Decimal(v or 0)
     except Exception:
-        return f"{value} €"
+        q = Decimal(0)
+    return f"{q:,.2f} €".replace(",", " ").replace(".", ",")
 
-def consigne_cents_for(qty_out: int, qty_in: int) -> int:
-    return (qty_out - qty_in) * 3000
+# ----------------------------------------------------------------------------
+# Auto-migration: ensure missing tables/columns exist
+# ----------------------------------------------------------------------------
+def ensure_schema():
+    with app.app_context():
+        inspector = inspect(db.engine)
+        # clients table
+        if not inspector.has_table("clients"):
+            db.session.execute(text("""
+                CREATE TABLE clients (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(120) NOT NULL UNIQUE,
+                    note TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                );
+            """))
+        else:
+            cols = {c["name"] for c in inspector.get_columns("clients")}
+            if "note" not in cols:
+                db.session.execute(text("ALTER TABLE clients ADD COLUMN note TEXT;"))
 
-def client_keg_summary(client_id: int) -> dict:
-    out_total, in_total, defect_total = (
+        # keg_moves table
+        if not inspector.has_table("keg_moves"):
+            db.session.execute(text("""
+                CREATE TABLE keg_moves (
+                    id SERIAL PRIMARY KEY,
+                    client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    qty_out INTEGER NOT NULL DEFAULT 0,
+                    qty_in INTEGER NOT NULL DEFAULT 0,
+                    qty_defect INTEGER NOT NULL DEFAULT 0,
+                    note TEXT
+                );
+                CREATE INDEX IF NOT EXISTS ix_keg_moves_client ON keg_moves(client_id);
+            """))
+        else:
+            cols = {c["name"] for c in inspector.get_columns("keg_moves")}
+            for needed in ("qty_out", "qty_in", "qty_defect"):
+                if needed not in cols:
+                    db.session.execute(text(f"ALTER TABLE keg_moves ADD COLUMN {needed} INTEGER NOT NULL DEFAULT 0;"))
+            if "created_at" not in cols:
+                db.session.execute(text("ALTER TABLE keg_moves ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT NOW();"))
+
+        # equip_moves table
+        if not inspector.has_table("equip_moves"):
+            db.session.execute(text("""
+                CREATE TABLE equip_moves (
+                    id SERIAL PRIMARY KEY,
+                    client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    equip_name VARCHAR(120) NOT NULL,
+                    qty_out INTEGER NOT NULL DEFAULT 0,
+                    qty_in INTEGER NOT NULL DEFAULT 0,
+                    note TEXT
+                );
+                CREATE INDEX IF NOT EXISTS ix_equip_moves_client ON equip_moves(client_id);
+            """))
+        else:
+            cols = {c["name"] for c in inspector.get_columns("equip_moves")}
+            for needed in ("equip_name", "qty_out", "qty_in"):
+                if needed not in cols:
+                    if needed == "equip_name":
+                        db.session.execute(text("ALTER TABLE equip_moves ADD COLUMN equip_name VARCHAR(120) NOT NULL DEFAULT 'Matériel';"))
+                    else:
+                        db.session.execute(text(f"ALTER TABLE equip_moves ADD COLUMN {needed} INTEGER NOT NULL DEFAULT 0;"))
+            if "created_at" not in cols:
+                db.session.execute(text("ALTER TABLE equip_moves ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT NOW();"))
+        db.session.commit()
+
+# Run once on startup
+ensure_schema()
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+CONS_PER_KEG = Decimal("30")
+
+def client_keg_summary(client_id: int):
+    r = (
         db.session.query(
-            func.coalesce(func.sum(KegMove.qty_out), 0),
-            func.coalesce(func.sum(KegMove.qty_in), 0),
-            func.coalesce(func.sum(KegMove.qty_defect), 0),
+            db.func.coalesce(db.func.sum(KegMove.qty_out), 0),
+            db.func.coalesce(db.func.sum(KegMove.qty_in), 0),
+            db.func.coalesce(db.func.sum(KegMove.qty_defect), 0),
         )
         .filter(KegMove.client_id == client_id)
         .one()
     )
-    present = (out_total or 0) - (in_total or 0) - (defect_total or 0)
-    consigne = consigne_cents_for(out_total or 0, in_total or 0)
-    return {"present_kegs": present, "consigne_cents": consigne}
+    out_q, in_q, defect_q = map(lambda x: int(x or 0), r)
+    in_play = out_q - in_q - defect_q
+    consigne = Decimal(in_play) * CONS_PER_KEG
+    return {"out": out_q, "in": in_q, "defect": defect_q, "in_play": in_play, "consigne": consigne}
 
 def client_equip_summary(client_id: int):
-    rows = (
+    r = (
         db.session.query(
-            EquipMove.label,
-            (
-                func.coalesce(func.sum(EquipMove.qty_out), 0)
-                - func.coalesce(func.sum(EquipMove.qty_in), 0)
-            ).label("bal")
+            db.func.coalesce(db.func.sum(EquipMove.qty_out), 0),
+            db.func.coalesce(db.func.sum(EquipMove.qty_in), 0),
         )
         .filter(EquipMove.client_id == client_id)
-        .group_by(EquipMove.label)
-        .having(
-            (
-                func.coalesce(func.sum(EquipMove.qty_out), 0)
-                - func.coalesce(func.sum(EquipMove.qty_in), 0)
-            ) > 0
-        )
-        .order_by(EquipMove.label.asc())
-        .all()
+        .one()
     )
-    return [(r[0], int(r[1])) for r in rows]
+    out_q, in_q = map(lambda x: int(x or 0), r)
+    return {"out": out_q, "in": in_q, "in_play": out_q - in_q}
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Routes
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 @app.route("/")
 def index():
     clients = Client.query.order_by(Client.name.asc()).all()
-
-    cards = []
-    total_kegs = 0
-    total_consigne = 0
-    total_equip = 0
-
+    rows = []
+    tot_keg = tot_cons = 0
     for c in clients:
         keg = client_keg_summary(c.id)
-        equip = client_equip_summary(c.id)
-
-        total_kegs += max(keg["present_kegs"], 0)
-        total_consigne += keg["consigne_cents"]
-        total_equip += sum(q for _, q in equip)
-
-        cards.append(
-            {
-                "id": c.id,
-                "name": c.name,
-                "kegs": keg["present_kegs"],
-                "consigne_cents": keg["consigne_cents"],
-                "equip": equip,
-            }
-        )
-
-    totals = {"kegs": total_kegs, "consigne_cents": total_consigne, "equip": total_equip}
-
-    tpl = """
-    <!doctype html>
-    <html lang="fr">
-    <head>
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>Suivi fûts - Tableau de bord</title>
-      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
-    </head>
-    <body class="bg-light">
-    <div class="container py-4">
-      <h1 class="mb-4">Suivi fûts — Tableau de bord</h1>
-
-      <div class="row g-3 mb-4">
-        <div class="col-md-4">
-          <div class="card border-0 shadow-sm"><div class="card-body">
-            <div class="text-muted">Fûts chez clients</div>
-            <div class="fs-3">{{ totals.kegs or 0 }}</div>
-          </div></div>
-        </div>
-        <div class="col-md-4">
-          <div class="card border-0 shadow-sm"><div class="card-body">
-            <div class="text-muted">Consigne en cours</div>
-            <div class="fs-3">{{ (totals.consigne_cents or 0)|eur }}</div>
-          </div></div>
-        </div>
-        <div class="col-md-4">
-          <div class="card border-0 shadow-sm"><div class="card-body">
-            <div class="text-muted">Matériel en prêt</div>
-            <div class="fs-3">{{ totals.equip or 0 }}</div>
-          </div></div>
-        </div>
-      </div>
-
-      <div class="d-flex justify-content-between align-items-center mb-2">
-        <h2 class="h4 mb-0">Clients</h2>
-        <a class="btn btn-sm btn-primary" href="{{ url_for('client_new') }}">➕ Nouveau client</a>
-      </div>
-
-      {% if cards %}
-      <div class="list-group">
-        {% for c in cards %}
-        <a href="{{ url_for('client_detail', client_id=c.id) }}" class="list-group-item list-group-item-action">
-          <div class="d-flex w-100 justify-content-between">
-            <h5 class="mb-1">{{ c.name }}</h5>
-            <small class="text-muted">Consigne: {{ (c.consigne_cents or 0)|eur }}</small>
-          </div>
-          <p class="mb-1">Fûts: {{ c.kegs or 0 }} • Matériel:
-            {% if c.equip %}
-              {% for label, q in c.equip %}
-                <span class="badge text-bg-secondary me-1">{{ label }} × {{ q }}</span>
-              {% endfor %}
-            {% else %}Aucun{% endif %}
-          </p>
-        </a>
-        {% endfor %}
-      </div>
-      {% else %}
-        <div class="alert alert-info">Aucun client pour l’instant. Créez-en un.</div>
-      {% endif %}
-    </div>
-    </body>
-    </html>
-    """
-    return render_template_string(tpl, cards=cards, totals=totals)
-
+        eq = client_equip_summary(c.id)
+        tot_keg += keg["in_play"]
+        tot_cons += keg["consigne"]
+        rows.append({
+            "id": c.id,
+            "name": c.name,
+            "note": getattr(c, "note", None),
+            "kegs": keg["in_play"],
+            "equip": eq["in_play"],
+            "consigne": keg["consigne"],
+        })
+    return render_template("index.html", clients=rows, total_kegs=tot_keg, total_cons=tot_cons)
 
 @app.route("/clients/new", methods=["GET", "POST"])
-def client_new():
+def clients_new():
     if request.method == "POST":
-        name = (request.form.get("name") or "").strip()
-        note = (request.form.get("note") or "").strip() or None
+        name = request.form.get("name", "").strip()
+        note = request.form.get("note") or None
         if not name:
-            flash("Nom obligatoire.", "warning")
-            return redirect(url_for("client_new"))
-        # unicité (insensible à la casse)
-        if db.session.query(Client.id).filter(func.lower(Client.name) == name.lower()).first():
-            flash("Ce client existe déjà.", "warning")
-            return redirect(url_for("client_new"))
-        c = Client(name=name, note=note)
-        db.session.add(c)
-        db.session.commit()
-        flash("Client créé.", "success")
-        return redirect(url_for("client_detail", client_id=c.id))
-
-    tpl = """
-    <!doctype html><html lang="fr"><head>
-    <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Nouveau client</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
-    </head><body class="bg-light"><div class="container py-4">
-      <h1 class="mb-4">Nouveau client</h1>
-      <form method="post" class="card p-3 shadow-sm">
-        <div class="mb-3">
-          <label class="form-label">Nom du client</label>
-          <input class="form-control" name="name" required>
-        </div>
-        <div class="mb-3">
-          <label class="form-label">Note (optionnel)</label>
-          <textarea class="form-control" name="note" rows="3"></textarea>
-        </div>
-        <div class="d-flex gap-2">
-          <button class="btn btn-primary" type="submit">Créer</button>
-          <a class="btn btn-secondary" href="{{ url_for('index') }}">Annuler</a>
-        </div>
-      </form>
-    </div></body></html>
-    """
-    return render_template_string(tpl)
-
+            flash("Nom obligatoire.", "danger")
+        else:
+            c = Client(name=name, note=note)
+            db.session.add(c)
+            db.session.commit()
+            flash("Client créé.", "success")
+            return redirect(url_for("index"))
+    return render_template("client_new.html")
 
 @app.route("/client/<int:client_id>")
-def client_detail(client_id: int):
+def client_detail(client_id):
     c = Client.query.get_or_404(client_id)
-
-    keg = client_keg_summary(client_id)
-    equip_rows = client_equip_summary(client_id)
-
-    moves_keg = (
+    keg_hist = (
         KegMove.query.filter_by(client_id=client_id)
-        .order_by(KegMove.mov_date.desc(), KegMove.id.desc())
+        .order_by(KegMove.created_at.desc())
         .limit(50)
         .all()
     )
-    moves_equip = (
+    equip_hist = (
         EquipMove.query.filter_by(client_id=client_id)
-        .order_by(EquipMove.mov_date.desc(), EquipMove.id.desc())
+        .order_by(EquipMove.created_at.desc())
         .limit(50)
         .all()
     )
+    keg = client_keg_summary(client_id)
+    eq = client_equip_summary(client_id)
+    return render_template("client_detail.html", c=c, keg=keg, equip=eq, keg_hist=keg_hist, equip_hist=equip_hist)
 
-    tpl = """
-    <!doctype html><html lang="fr"><head>
-    <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Fiche client</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
-    </head><body class="bg-light"><div class="container py-4">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h1 class="h3 mb-0">Client — {{ c.name }}</h1>
-        <a class="btn btn-secondary" href="{{ url_for('index') }}">← Retour</a>
-      </div>
-
-      <div class="row g-3 mb-4">
-        <div class="col-md-4"><div class="card shadow-sm"><div class="card-body">
-          <div class="text-muted">Fûts présents</div>
-          <div class="fs-3">{{ keg.present_kegs or 0 }}</div>
-        </div></div></div>
-        <div class="col-md-4"><div class="card shadow-sm"><div class="card-body">
-          <div class="text-muted">Consigne en cours</div>
-          <div class="fs-3">{{ (keg.consigne_cents or 0)|eur }}</div>
-        </div></div></div>
-        <div class="col-md-4"><div class="card shadow-sm"><div class="card-body">
-          <div class="text-muted">Matériel en prêt</div>
-          <div class="fs-3">
-            {% set total_e = 0 %}
-            {% for _, q in equip_rows %}{% set total_e = total_e + q %}{% endfor %}
-            {{ total_e }}
-          </div>
-        </div></div></div>
-      </div>
-
-      <h2 class="h5">Saisir un mouvement</h2>
-      <form method="post" action="{{ url_for('movement_new', client_id=c.id) }}" class="card p-3 shadow-sm mb-4">
-        <div class="row g-2">
-          <div class="col-12 col-md-3">
-            <label class="form-label">Date</label>
-            <input type="date" class="form-control" name="mov_date" value="{{ (now or '') }}">
-          </div>
-          <div class="col-4 col-md-3">
-            <label class="form-label">Livraison fûts</label>
-            <input type="number" class="form-control" name="qty_out" value="0" min="0">
-          </div>
-          <div class="col-4 col-md-3">
-            <label class="form-label">Reprise fûts</label>
-            <input type="number" class="form-control" name="qty_in" value="0" min="0">
-          </div>
-          <div class="col-4 col-md-3">
-            <label class="form-label">Défectueux</label>
-            <input type="number" class="form-control" name="qty_defect" value="0" min="0">
-          </div>
-        </div>
-
-        <hr>
-
-        <div class="row g-2 align-items-end">
-          <div class="col-12 col-md-6">
-            <label class="form-label">Matériel (libellé)</label>
-            <input type="text" class="form-control" name="equip_label" placeholder="ex: Tirage 2 voies">
-          </div>
-          <div class="col-6 col-md-3">
-            <label class="form-label">Prêt</label>
-            <input type="number" class="form-control" name="equip_out" value="0" min="0">
-          </div>
-          <div class="col-6 col-md-3">
-            <label class="form-label">Retour</label>
-            <input type="number" class="form-control" name="equip_in" value="0" min="0">
-          </div>
-        </div>
-
-        <div class="mt-3">
-          <button class="btn btn-primary" type="submit">Enregistrer</button>
-        </div>
-      </form>
-
-      <div class="row g-3">
-        <div class="col-md-6">
-          <h2 class="h5">Historique fûts</h2>
-          <div class="list-group">
-            {% for m in moves_keg %}
-            <div class="list-group-item">
-              <div class="d-flex justify-content-between">
-                <strong>{{ m.mov_date }}</strong>
-                <form method="post" action="{{ url_for('movement_keg_delete', move_id=m.id, client_id=c.id) }}" onsubmit="return confirm('Supprimer ce mouvement fûts ?');">
-                  <button class="btn btn-sm btn-outline-danger">Supprimer</button>
-                </form>
-              </div>
-              <div>Livré: {{ m.qty_out }} • Repris: {{ m.qty_in }} • Défectueux: {{ m.qty_defect }}</div>
-            </div>
-            {% else %}
-            <div class="list-group-item text-muted">Aucun mouvement.</div>
-            {% endfor %}
-          </div>
-        </div>
-
-        <div class="col-md-6">
-          <h2 class="h5">Historique matériel</h2>
-          <div class="list-group">
-            {% for e in moves_equip %}
-            <div class="list-group-item">
-              <div class="d-flex justify-content-between">
-                <strong>{{ e.mov_date }} — {{ e.label }}</strong>
-                <form method="post" action="{{ url_for('movement_equip_delete', move_id=e.id, client_id=c.id) }}" onsubmit="return confirm('Supprimer ce mouvement matériel ?');">
-                  <button class="btn btn-sm btn-outline-danger">Supprimer</button>
-                </form>
-              </div>
-              <div>Prêté: {{ e.qty_out }} • Retourné: {{ e.qty_in }}</div>
-            </div>
-            {% else %}
-            <div class="list-group-item text-muted">Aucun mouvement.</div>
-            {% endfor %}
-          </div>
-        </div>
-      </div>
-    </div></body></html>
-    """
-    return render_template_string(
-        tpl,
-        c=c,
-        keg=keg,
-        equip_rows=equip_rows,
-        moves_keg=moves_keg,
-        moves_equip=moves_equip,
-        now=date.today().isoformat(),
-    )
-
-
-@app.route("/client/<int:client_id>/movement/new", methods=["POST"])
-def movement_new(client_id: int):
-    Client.query.get_or_404(client_id)
-
-    mov_date_str = request.form.get("mov_date") or date.today().isoformat()
-    try:
-        y, m, d = [int(x) for x in mov_date_str.split("-")]
-        mov_date = date(y, m, d)
-    except Exception:
-        mov_date = date.today()
-
+@app.route("/client/<int:client_id>/keg/new", methods=["POST"])
+def keg_new(client_id):
     qty_out = int(request.form.get("qty_out") or 0)
     qty_in = int(request.form.get("qty_in") or 0)
     qty_defect = int(request.form.get("qty_defect") or 0)
-    if qty_out or qty_in or qty_defect:
-        db.session.add(
-            KegMove(
-                client_id=client_id,
-                mov_date=mov_date,
-                qty_out=qty_out,
-                qty_in=qty_in,
-                qty_defect=qty_defect,
-            )
-        )
-
-    equip_label = (request.form.get("equip_label") or "").strip()
-    equip_out = int(request.form.get("equip_out") or 0)
-    equip_in = int(request.form.get("equip_in") or 0)
-    if equip_label and (equip_out or equip_in):
-        db.session.add(
-            EquipMove(
-                client_id=client_id,
-                mov_date=mov_date,
-                label=equip_label,
-                qty_out=equip_out,
-                qty_in=equip_in,
-            )
-        )
-
+    note = request.form.get("note")
+    m = KegMove(client_id=client_id, qty_out=qty_out, qty_in=qty_in, qty_defect=qty_defect, note=note)
+    db.session.add(m)
     db.session.commit()
-    flash("Mouvement enregistré.", "success")
+    flash("Mouvement fûts enregistré.", "success")
     return redirect(url_for("client_detail", client_id=client_id))
 
-
-@app.route("/client/<int:client_id>/movement/keg/delete/<int:move_id>", methods=["POST"])
-def movement_keg_delete(client_id: int, move_id: int):
-    m = KegMove.query.filter_by(id=move_id, client_id=client_id).first_or_404()
-    db.session.delete(m)
+@app.route("/client/<int:client_id>/equip/new", methods=["POST"])
+def equip_new(client_id):
+    equip_name = (request.form.get("equip_name") or "Matériel").strip() or "Matériel"
+    qty_out = int(request.form.get("qty_out") or 0)
+    qty_in = int(request.form.get("qty_in") or 0)
+    note = request.form.get("note")
+    m = EquipMove(client_id=client_id, equip_name=equip_name, qty_out=qty_out, qty_in=qty_in, note=note)
+    db.session.add(m)
     db.session.commit()
-    flash("Mouvement fûts supprimé.", "success")
+    flash("Mouvement matériel enregistré.", "success")
     return redirect(url_for("client_detail", client_id=client_id))
 
+# ----------------------------------------------------------------------------
+# Minimal templates (fallback if your repo hasn't them)
+# ----------------------------------------------------------------------------
+# These allow the app to render even if templates are missing in the repo.
+from jinja2 import TemplateNotFound
 
-@app.route("/client/<int:client_id>/movement/equip/delete/<int:move_id>", methods=["POST"])
-def movement_equip_delete(client_id: int, move_id: int):
-    e = EquipMove.query.filter_by(id=move_id, client_id=client_id).first_or_404()
-    db.session.delete(e)
-    db.session.commit()
-    flash("Mouvement matériel supprimé.", "success")
-    return redirect(url_for("client_detail", client_id=client_id))
+def _render_or_inline(tpl_name, inline_html):
+    try:
+        return render_template(tpl_name)
+    except TemplateNotFound:
+        return inline_html
+
+@app.route("/__inline__/index.html")
+def __inline_index():
+    return _render_or_inline("index.html", """
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Suivi fûts</title></head>
+<body>
+  <h1>Clients</h1>
+  <p>Total fûts en jeu: {{ total_kegs }} — Consignes: {{ total_cons|eur }}</p>
+  <ul>
+    {% for r in clients %}
+      <li><a href="{{ url_for('client_detail', client_id=r.id) }}">{{ r.name }}</a> — fûts: {{ r.kegs }}, matériel: {{ r.equip }}, consignes: {{ r.consigne|eur }}</li>
+    {% endfor %}
+  </ul>
+  <p><a href="{{ url_for('clients_new') }}">+ Nouveau client</a></p>
+</body></html>
+""")
+
+# Serve real template name too so the route works with real files.
+@app.route("/__inline__/client_new.html")
+def __inline_client_new():
+    return _render_or_inline("client_new.html", """
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Nouveau client</title></head>
+<body>
+  <h1>Nouveau client</h1>
+  <form method="post">
+    <label>Nom <input name="name" required></label><br>
+    <label>Note <input name="note"></label><br>
+    <button type="submit">Créer</button>
+  </form>
+  <p><a href="{{ url_for('index') }}">Retour</a></p>
+</body></html>
+""")
+
+@app.route("/__inline__/client_detail.html")
+def __inline_client_detail():
+    return _render_or_inline("client_detail.html", """
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Client</title></head>
+<body>
+  <h1>{{ c.name }}</h1>
+  <p>Fûts en jeu: {{ keg.in_play }} — Consignes: {{ keg.consigne|eur }}</p>
+  <h2>Saisir mouvement fûts</h2>
+  <form method="post" action="{{ url_for('keg_new', client_id=c.id) }}">
+    Sortis <input type="number" name="qty_out" min="0" value="0">
+    Rentrés <input type="number" name="qty_in" min="0" value="0">
+    Défectueux <input type="number" name="qty_defect" min="0" value="0">
+    <input name="note" placeholder="Note">
+    <button type="submit">Enregistrer</button>
+  </form>
+
+  <h2>Saisir mouvement matériel</h2>
+  <form method="post" action="{{ url_for('equip_new', client_id=c.id) }}">
+    Matériel <input name="equip_name" placeholder="Tireuse, CO2, etc.">
+    Sortis <input type="number" name="qty_out" min="0" value="0">
+    Rentrés <input type="number" name="qty_in" min="0" value="0">
+    <input name="note" placeholder="Note">
+    <button type="submit">Enregistrer</button>
+  </form>
+
+  <h2>Historique fûts</h2>
+  <ul>{% for m in keg_hist %}
+      <li>{{ m.created_at.date() }} — +{{ m.qty_out }} / -{{ m.qty_in }} / défectueux {{ m.qty_defect }} — {{ m.note or '' }}</li>
+  {% endfor %}</ul>
+
+  <h2>Historique matériel</h2>
+  <ul>{% for m in equip_hist %}
+      <li>{{ m.created_at.date() }} — {{ m.equip_name }} : +{{ m.qty_out }} / -{{ m.qty_in }} — {{ m.note or '' }}</li>
+  {% endfor %}</ul>
+
+  <p><a href="{{ url_for('index') }}">Retour</a></p>
+</body></html>
+""")
+
+if __name__ == "__main__":
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
