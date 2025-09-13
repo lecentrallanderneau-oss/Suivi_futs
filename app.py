@@ -6,10 +6,10 @@ from dotenv import load_dotenv
 from flask import (
     Flask, render_template_string, request, redirect, url_for, flash
 )
+from sqlalchemy import func, text
 
-# ⚠️ On importe la DB et les modèles depuis models.py
+# 👉 on importe la DB et les modèles définis dans models.py
 from models import db, Client, KegMove, EquipMove
-from sqlalchemy import func
 
 # -----------------------------------------------------------------------------
 # App & configuration
@@ -20,26 +20,35 @@ app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///local.db")
-# Compat Render/Heroku
+# Compat Heroku/Render
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
 
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-# ⚙️ on « branche » la DB du models.py sur cette app
 db.init_app(app)
 
-# Création auto des tables si absentes
+# -----------------------------------------------------------------------------
+# Création des tables + garde-fous de schéma (ajout colonne manquante)
+# -----------------------------------------------------------------------------
 with app.app_context():
     db.create_all()
+
+    # Si Postgres côté Render n’a pas la colonne clients.note, on l’ajoute.
+    try:
+        if db.engine.url.get_backend_name().startswith("postgresql"):
+            db.session.execute(text("ALTER TABLE clients ADD COLUMN IF NOT EXISTS note TEXT"))
+            db.session.commit()
+    except Exception as e:
+        # On ne casse pas le boot si l'ALTER n'est pas supporté ; on loggue juste.
+        app.logger.warning(f"Schema check warning: {e}")
 
 # -----------------------------------------------------------------------------
 # Filtres / helpers
 # -----------------------------------------------------------------------------
 @app.template_filter("eur")
 def eur_filter(value):
-    """Affiche des centimes en euros (12345 -> 123,45 €)."""
     try:
         cents = int(Decimal(str(value)))
         return f"{Decimal(cents) / Decimal(100):.2f} €".replace(".", ",")
@@ -47,12 +56,9 @@ def eur_filter(value):
         return f"{value} €"
 
 def consigne_cents_for(qty_out: int, qty_in: int) -> int:
-    """30 € par fût livré, -30 € par fût repris."""
     return (qty_out - qty_in) * 3000
 
-
 def client_keg_summary(client_id: int) -> dict:
-    """Synthèse fûts pour un client."""
     out_total, in_total, defect_total = (
         db.session.query(
             func.coalesce(func.sum(KegMove.qty_out), 0),
@@ -62,14 +68,11 @@ def client_keg_summary(client_id: int) -> dict:
         .filter(KegMove.client_id == client_id)
         .one()
     )
-
     present = (out_total or 0) - (in_total or 0) - (defect_total or 0)
     consigne = consigne_cents_for(out_total or 0, in_total or 0)
     return {"present_kegs": present, "consigne_cents": consigne}
 
-
-def client_equip_summary(client_id: int) -> list[tuple[str, int]]:
-    """Liste (label, quantité en prêt > 0)."""
+def client_equip_summary(client_id: int):
     rows = (
         db.session.query(
             EquipMove.label,
@@ -84,8 +87,7 @@ def client_equip_summary(client_id: int) -> list[tuple[str, int]]:
             (
                 func.coalesce(func.sum(EquipMove.qty_out), 0)
                 - func.coalesce(func.sum(EquipMove.qty_in), 0)
-            )
-            > 0
+            ) > 0
         )
         .order_by(EquipMove.label.asc())
         .all()
@@ -97,10 +99,9 @@ def client_equip_summary(client_id: int) -> list[tuple[str, int]]:
 # -----------------------------------------------------------------------------
 @app.route("/")
 def index():
-    """Liste clients + résumé global (starter minimal garanti)."""
     clients = Client.query.order_by(Client.name.asc()).all()
 
-    cards: list[dict] = []
+    cards = []
     total_kegs = 0
     total_consigne = 0
     total_equip = 0
@@ -123,13 +124,8 @@ def index():
             }
         )
 
-    totals = {
-        "kegs": total_kegs,
-        "consigne_cents": total_consigne,
-        "equip": total_equip,
-    }
+    totals = {"kegs": total_kegs, "consigne_cents": total_consigne, "equip": total_equip}
 
-    # Template inline (tu pourras passer à des fichiers templates plus tard)
     tpl = """
     <!doctype html>
     <html lang="fr">
@@ -188,7 +184,7 @@ def index():
         {% endfor %}
       </div>
       {% else %}
-        <div class="alert alert-info">Aucun client pour l’instant. Commence par en créer un.</div>
+        <div class="alert alert-info">Aucun client pour l’instant. Créez-en un.</div>
       {% endif %}
     </div>
     </body>
@@ -205,6 +201,7 @@ def client_new():
         if not name:
             flash("Nom obligatoire.", "warning")
             return redirect(url_for("client_new"))
+        # unicité (insensible à la casse)
         if db.session.query(Client.id).filter(func.lower(Client.name) == name.lower()).first():
             flash("Ce client existe déjà.", "warning")
             return redirect(url_for("client_new"))
@@ -396,7 +393,6 @@ def movement_new(client_id: int):
     except Exception:
         mov_date = date.today()
 
-    # Fûts
     qty_out = int(request.form.get("qty_out") or 0)
     qty_in = int(request.form.get("qty_in") or 0)
     qty_defect = int(request.form.get("qty_defect") or 0)
@@ -411,7 +407,6 @@ def movement_new(client_id: int):
             )
         )
 
-    # Matériel
     equip_label = (request.form.get("equip_label") or "").strip()
     equip_out = int(request.form.get("equip_out") or 0)
     equip_in = int(request.form.get("equip_in") or 0)
