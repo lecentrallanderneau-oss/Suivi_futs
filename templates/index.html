@@ -1,36 +1,49 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="d-flex align-items-center justify-content-between mb-3">
+<div class="d-flex align-items-center justify-content-between">
   <h1 class="h4 m-0">Clients</h1>
-  <a class="btn btn-primary" href="{{ url_for('new_client') }}">Ajouter un client</a>
+  <span class="small text-muted">Dernière mise à jour : {{ now.strftime("%d/%m/%Y %H:%M") }}</span>
 </div>
 
-<div class="table-responsive">
-  <table class="table table-sm align-middle">
-    <thead>
-      <tr>
-        <th>Nom</th>
-        <th>Contact</th>
-        <th class="text-end">Stock (fûts)</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-    {% for c in clients %}
-      <tr>
-        <td><a href="{{ url_for('client_detail', client_id=c.id) }}" class="text-decoration-none">{{ c.name }}</a></td>
-        <td>{{ c.contact or "—" }}</td>
-        <td class="text-end fw-semibold">{{ stocks[c.id] }}</td>
-        <td class="text-end">
-          <form method="post" action="{{ url_for('delete_client', client_id=c.id) }}" onsubmit="return confirm('Supprimer {{ c.name }} ? Cette action est définitive.');">
-            <button class="btn btn-sm btn-outline-danger">Supprimer</button>
-          </form>
-        </td>
-      </tr>
-    {% else %}
-      <tr><td colspan="4" class="text-center text-muted">Aucun client pour l’instant.</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
+<hr>
+
+<div class="row">
+  <div class="col-lg-7">
+    <div class="card">
+      <div class="card-header py-2">
+        <strong>Liste des clients</strong>
+      </div>
+      <div class="list-group list-group-flush">
+        {% if clients %}
+          {% for c in clients %}
+            <a class="list-group-item list-group-item-action d-flex justify-content-between align-items-center"
+               href="{{ url_for('client_detail', client_id=c.id) }}">
+              <span class="fw-semibold">{{ c.name }}</span>
+              <span class="small text-muted">{{ c.contact or "—" }}</span>
+            </a>
+          {% endfor %}
+        {% else %}
+          <div class="list-group-item text-muted">Aucun client pour l’instant.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-5 mt-4 mt-lg-0">
+    <div class="card">
+      <div class="card-header py-2"><strong>Ajouter un client</strong></div>
+      <form class="card-body" method="post" action="{{ url_for('add_client') }}">
+        <div class="mb-3">
+          <label class="form-label">Nom *</label>
+          <input type="text" name="name" class="form-control" placeholder="Ex: Le Central" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Contact</label>
+          <input type="text" name="contact" class="form-control" placeholder="Téléphone, email… (facultatif)">
+        </div>
+        <button class="btn btn-primary">Ajouter</button>
+      </form>
+    </div>
+  </div>
 </div>
 {% endblock %}
