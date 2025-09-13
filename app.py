@@ -9,7 +9,7 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
 
 # ------------------------------------------------------------------------------
-# Config Flask + DB (une seule instance SQLAlchemy(app))
+# Config Flask + DB
 # ------------------------------------------------------------------------------
 def _make_db_uri() -> str:
     uri = os.getenv("DATABASE_URL", "").strip()
@@ -25,10 +25,10 @@ app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = _make_db_uri()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-db = SQLAlchemy(app)  # << une seule instance liée à app
+db = SQLAlchemy(app)  # une seule instance liée à app
 
 # ------------------------------------------------------------------------------
-# Modèles simples
+# Modèles
 # ------------------------------------------------------------------------------
 class Client(db.Model):
     __tablename__ = "clients"
@@ -55,27 +55,39 @@ class EquipMove(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 # ------------------------------------------------------------------------------
-# Auto-migration minimale
+# Auto-migration minimale (idempotente)
 # ------------------------------------------------------------------------------
 def ensure_schema():
     with app.app_context():
+        # crée les tables si elles n'existent pas
         db.create_all()
-        if db.session.bind.dialect.name == "postgresql":
-            ddl = [
-                "ALTER TABLE clients ADD COLUMN IF NOT EXISTS note TEXT",
-                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_out INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_in INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_defect INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS equip_name VARCHAR(128)",
-                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS qty_out INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS qty_in INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-            ]
-            for stmt in ddl:
-                db.session.execute(text(stmt))
-            db.session.commit()
 
+        # si ce n'est pas Postgres (ex: SQLite local), on s'arrête là
+        try:
+            dialect_name = db.engine.dialect.name  # <== toujours défini ici
+        except Exception:
+            dialect_name = ""
+
+        if dialect_name != "postgresql":
+            return
+
+        ddl = [
+            "ALTER TABLE clients ADD COLUMN IF NOT EXISTS note TEXT",
+            "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_out INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_in INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_defect INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+            "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS equip_name VARCHAR(128)",
+            "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS qty_out INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS qty_in INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        ]
+        # exécution via une transaction explicite
+        with db.engine.begin() as conn:
+            for stmt in ddl:
+                conn.execute(text(stmt))
+
+# Appel à l’import (ok pour Gunicorn)
 ensure_schema()
 
 # ------------------------------------------------------------------------------
@@ -93,28 +105,28 @@ def eur(value):
 # ------------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------------
-CONSigne_PAR_FUT = Decimal("30")
+CONSIGNE_PAR_FUT = Decimal("30")
 
 def client_keg_summary(client_id: int) -> dict:
     row = db.session.execute(
         text(
             """
             SELECT
-              COALESCE(SUM(qty_out), 0)  AS out_sum,
-              COALESCE(SUM(qty_in), 0)   AS in_sum,
-              COALESCE(SUM(qty_defect), 0) AS defect_sum
+              COALESCE(SUM(qty_out), 0)     AS out_sum,
+              COALESCE(SUM(qty_in), 0)      AS in_sum,
+              COALESCE(SUM(qty_defect), 0)  AS defect_sum
             FROM keg_moves
             WHERE client_id = :cid
             """
         ),
         {"cid": client_id},
     ).one()
-    m = row._mapping  # éviter row.in (mot-clé)
+    m = row._mapping
     qty_out = int(m["out_sum"] or 0)
     qty_in = int(m["in_sum"] or 0)
     qty_def = int(m["defect_sum"] or 0)
     in_play = qty_out - qty_in - qty_def
-    consignes = CONSigne_PAR_FUT * Decimal(max(in_play, 0))
+    consignes = CONSIGNE_PAR_FUT * Decimal(max(in_play, 0))
     return {"out": qty_out, "in": qty_in, "defect": qty_def, "in_play": in_play, "consignes": consignes}
 
 def client_equip_summary(client_id: int) -> dict[str, int]:
@@ -161,6 +173,7 @@ def index():
     try:
         return render_template("index.html", cards=cards, total_kegs=total_kegs, total_consignes=total_consignes)
     except Exception:
+        # fallback inline (si les templates ne sont pas déployés)
         return render_template_string(
             """
             <!doctype html><html><head><meta charset="utf-8"><title>Suivi fûts</title>
@@ -232,7 +245,7 @@ def client_detail(client_id: int):
             "client_detail.html",
             c=c, k=k, e=e,
             keg_rows=keg_rows, equip_rows=equip_rows,
-            CONSIGNE=float(CONSigne_PAR_FUT),
+            CONSIGNE=float(CONSIGNE_PAR_FUT),
         )
     except Exception:
         return render_template_string(
@@ -268,7 +281,7 @@ def client_detail(client_id: int):
             """,
             c=c, k=k, e=e,
             keg_rows=keg_rows, equip_rows=equip_rows,
-            CONSIGNE=float(CONSigne_PAR_FUT),
+            CONSIGNE=float(CONSIGNE_PAR_FUT),
         )
 
 @app.route("/client/<int:client_id>/keg/new", methods=["POST"])
