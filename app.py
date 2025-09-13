@@ -1,4 +1,3 @@
-# app.py
 from __future__ import annotations
 
 import os
@@ -8,51 +7,43 @@ from urllib.parse import urlparse
 from flask import Flask, render_template, abort
 from flask_sqlalchemy import SQLAlchemy
 
-# -----------------------------------------------------------------------------
-# Config Flask
-# -----------------------------------------------------------------------------
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
 
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # Base de données
-# - En prod (Render) : DATABASE_URL -> forcer driver psycopg3
-# - En local : SQLite
-# -----------------------------------------------------------------------------
+#  - Prod (Render): DATABASE_URL -> forcer le driver psycopg3
+#  - Local: SQLite
+# -------------------------------------------------------------------
 db_url = os.environ.get("DATABASE_URL")
-
 if db_url:
-    # Render peut donner "postgres://..." -> standardiser
+    # Render peut fournir "postgres://..."
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
-
-    # Si l’URL est "postgresql://..." (driver implicite psycopg2),
-    # on force psycopg3 avec "postgresql+psycopg://..."
+    # On force psycopg3 (sinon Flask/SQLAlchemy tente psycopg2)
     if db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 else:
-    # fallback local
     db_url = "sqlite:///local.db"
 
 app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-# Option utile avec certains reverse proxies / connexions dormantes
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 
 db = SQLAlchemy(app)
 
-# -----------------------------------------------------------------------------
-# Modèles minimalistes (structure stable)
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Modèles MINIMAUX (structure stable). On ajoute au fur et à mesure.
+# -------------------------------------------------------------------
 class Client(db.Model):
     __tablename__ = "clients"
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String, nullable=False)
 
 
-# -----------------------------------------------------------------------------
-# Filtres & context processors
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Filtres & context
+# -------------------------------------------------------------------
 @app.template_filter("eur")
 def eur_filter(cents: int | None) -> str:
     """Formate des centimes en '12,34 €'."""
@@ -61,34 +52,51 @@ def eur_filter(cents: int | None) -> str:
 
 @app.context_processor
 def inject_now():
-    # IMPORTANT : renvoyer un objet datetime, pas la fonction
+    # IMPORTANT : injecter un objet datetime (pas la fonction)
     return {"now": datetime.utcnow()}
 
 
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # Routes
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------
 @app.route("/")
 def index():
-    clients = Client.query.order_by(Client.name.asc()).all()
+    # Si la table n'existe pas encore en prod, on évite de crasher.
+    try:
+        clients = Client.query.order_by(Client.name.asc()).all()
+    except Exception:
+        clients = []
     return render_template("index.html", clients=clients)
 
 @app.route("/clients")
 def clients():
-    clients = Client.query.order_by(Client.name.asc()).all()
+    try:
+        clients = Client.query.order_by(Client.name.asc()).all()
+    except Exception:
+        clients = []
     return render_template("clients.html", clients=clients)
 
 @app.route("/clients/<int:client_id>")
 def client_detail(client_id: int):
-    client = Client.query.get(client_id)
+    try:
+        client = Client.query.get(client_id)
+    except Exception:
+        client = None
     if not client:
         abort(404)
     return render_template("client_detail.html", client=client)
 
+# ✅ Nouveau : endpoint 'catalog' pour que les templates ne plantent plus
+@app.route("/catalog", endpoint="catalog")
+def catalog_page():
+    # Page neutre pour l’instant : pas de requête sur un modèle “Product”
+    # tant que le schéma n’est pas stabilisé.
+    return render_template("catalog.html")
 
-# -----------------------------------------------------------------------------
-# Lancement local uniquement (création SQLite)
-# -----------------------------------------------------------------------------
+
+# -------------------------------------------------------------------
+# Lancement local : création des tables SQLite si besoin
+# -------------------------------------------------------------------
 if __name__ == "__main__":
     parsed = urlparse(app.config["SQLALCHEMY_DATABASE_URI"])
     if parsed.scheme.startswith("sqlite"):
