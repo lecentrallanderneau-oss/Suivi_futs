@@ -1,37 +1,16 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="d-flex align-items-center justify-content-between mb-3">
-  <h1 class="h3 m-0">Clients</h1>
-</div>
+  <h1 class="h4 mb-3">Clients</h1>
 
-<div class="card mb-4">
-  <div class="card-body">
-    <form class="row g-2" method="post" action="{{ url_for('add_client') }}">
-      <div class="col-md-6">
-        <label class="form-label">Nom du client</label>
-        <input type="text" name="name" class="form-control" placeholder="Ex : Café de la Place" required>
-      </div>
-      <div class="col-md-3 align-self-end">
-        <button class="btn btn-success w-100" type="submit">Ajouter</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<div class="card">
-  <div class="card-body">
-    {% if clients %}
-      <ul class="list-group list-group-flush">
-        {% for c in clients %}
-        <li class="list-group-item d-flex justify-content-between align-items-center">
-          <span>{{ c.name }}</span>
-          <a class="btn btn-sm btn-primary" href="{{ url_for('client_detail', client_id=c.id) }}">Gérer</a>
-        </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="mb-0 text-muted">Aucun client enregistré.</p>
-    {% endif %}
-  </div>
-</div>
+  {% if clients and clients|length %}
+    <div class="list-group">
+      {% for c in clients %}
+        <a href="{{ url_for('client_detail', client_id=c.id) }}" class="list-group-item list-group-item-action">
+          {{ c.name }}
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="alert alert-info">Aucun client pour le moment.</div>
+  {% endif %}
 {% endblock %}
