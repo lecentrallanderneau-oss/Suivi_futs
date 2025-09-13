@@ -1,99 +1,93 @@
 # app.py
 import os
-from flask import Flask, render_template, jsonify
 from datetime import datetime
+from flask import Flask, render_template, jsonify, abort
 
-# IMPORTANT : on réutilise l'instance db depuis models.py
-# (pour éviter "The current Flask app is not registered with this 'SQLAlchemy' instance")
-from models import db, Client  # importe uniquement ce dont on est sûr qu'existe
+# On réutilise l'instance SQLAlchemy déclarée dans models.py
+from models import db, Client
 
-# Chargement initial du catalogue (produits + matériel)
-# -> ce module est optionnel mais recommandé (cf. fichiers fournis précédemment)
+# Chargement (facultatif) du catalogue initial si le module existe
 try:
     from catalog_loader import load_initial_catalog_if_empty
 except Exception:
-    load_initial_catalog_if_empty = None  # si absent, on ignore
+    load_initial_catalog_if_empty = None
 
-# ---------------------------------------------------------------------
-# Création et configuration de l'application
-# ---------------------------------------------------------------------
+
 def create_app() -> Flask:
     app = Flask(__name__)
 
-    # --- Config DB pour Render ---
-    # Render fournit la variable DATABASE_URL
+    # --------- Config DB (Render) ---------
     db_url = os.getenv("DATABASE_URL", "").strip()
     if db_url.startswith("postgres://"):
-        # SQLAlchemy moderne préfère 'postgresql+psycopg'
+        # Normalise pour SQLAlchemy moderne
         db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
 
-    if db_url:
-        app.config["SQLALCHEMY_DATABASE_URI"] = db_url
-    else:
-        # fallback local si besoin
-        app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///local.db"
-
+    app.config["SQLALCHEMY_DATABASE_URI"] = db_url or "sqlite:///local.db"
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-    # Initialise l'extension SQLAlchemy avec CETTE app
+    # Initialise SQLAlchemy avec CETTE app (évite l'erreur init_app)
     db.init_app(app)
 
-    # -----------------------------------------------------------------
-    # Filtres Jinja
-    # -----------------------------------------------------------------
+    # --------- Filtres Jinja ---------
     @app.template_filter("eur")
     def eur_filter(value):
-        """
-        Formatage EUR : 1234.5 -> '1 234,50 €'
-        Supporte int/float/Decimal/str.
-        """
+        """Format EUR simple : 1234.5 -> '1 234,50 €'"""
         try:
             num = float(value)
         except Exception:
             return value
         s = f"{num:,.2f}"
-        # US -> FR (virgule décimale + espace fine insécable pour milliers)
         s = s.replace(",", "X").replace(".", ",").replace("X", " ")
         return s + " €"
 
-    # -----------------------------------------------------------------
-    # Hooks de démarrage : on ne fait que ce qui est sûr
-    # - Pas de create_all() sur PostgreSQL géré (migrations ailleurs)
-    # - On tente le chargement du catalogue si la base est accessible
-    # -----------------------------------------------------------------
+    # --------- Démarrage (safe) ---------
     with app.app_context():
-        # Sur SQLite local uniquement on peut créer les tables (facilite tests)
-        uri = app.config.get("SQLALCHEMY_DATABASE_URI", "")
-        if uri.startswith("sqlite:///"):
+        # Sur SQLite local uniquement, on peut créer les tables
+        if app.config["SQLALCHEMY_DATABASE_URI"].startswith("sqlite:///"):
             try:
                 db.create_all()
             except Exception as e:
-                # On ne bloque pas le déploiement si create_all échoue
                 app.logger.warning(f"create_all() ignoré : {e}")
 
-        # Charge le catalogue si le module est présent
+        # Essai de chargement du catalogue si présent
         if load_initial_catalog_if_empty is not None:
             try:
                 load_initial_catalog_if_empty()
             except Exception as e:
                 app.logger.warning(f"Catalogue non chargé (info) : {e}")
 
-    # -----------------------------------------------------------------
-    # Routes
-    # -----------------------------------------------------------------
+    # --------- Routes ---------
     @app.route("/health")
     def health():
         return jsonify({"status": "ok", "time": datetime.utcnow().isoformat() + "Z"})
 
     @app.route("/")
     def index():
+        """Accueil : on passe simplement la liste des clients au template."""
+        clients = Client.query.order_by(Client.name.asc()).all()
+        return render_template("index.html", clients=clients, now=datetime.now())
+
+    @app.route("/clients", endpoint="clients")
+    def clients_route():
         """
-        Page d'accueil ultra-safe : on envoie UNIQUEMENT la liste des clients.
-        -> Pas de champs 'city' / 'note', pas d'agrégations sur d'autres tables.
-        Le template 'templates/index.html' devra boucler sur 'clients'.
+        Route attendue par base.html (url_for('clients')).
+        Pour l’instant, on réutilise index.html pour afficher la liste.
         """
         clients = Client.query.order_by(Client.name.asc()).all()
         return render_template("index.html", clients=clients, now=datetime.now())
+
+    @app.route("/clients/<int:client_id>", endpoint="client_detail")
+    def client_detail(client_id: int):
+        """
+        Détail client minimal pour éviter d'autres erreurs si un lien existe.
+        Si tu n'as pas encore de template 'client.html', on renvoie une page simple.
+        """
+        client = Client.query.get(client_id)
+        if not client:
+            abort(404, description="Client introuvable")
+        # Si tu as un template dédié, décommente la ligne suivante et ajoute le fichier.
+        # return render_template("client.html", client=client)
+        return f"<h1>{client.name}</h1><p>ID: {client.id}</p><p>(Page client à compléter)</p>"
 
     return app
 
@@ -101,8 +95,6 @@ def create_app() -> Flask:
 # Objet WSGI pour gunicorn ("app:app")
 app = create_app()
 
-# Lancement local éventuel
 if __name__ == "__main__":
-    # host=0.0.0.0 + port = Render/Heroku-like
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=os.getenv("FLASK_DEBUG", "0") == "1")
