@@ -4,12 +4,12 @@
   <h1 class="h4 m-0">{{ client.name }}</h1>
   <div class="text-end small">
     Contact : <strong>{{ client.contact or "—" }}</strong><br>
-    Stock actuel : <strong>{{ client_stock }}</strong> fûts
   </div>
 </div>
 
 <hr>
 
+{# Formulaire ajout mouvement #}
 <h2 class="h6">Ajouter un mouvement</h2>
 <form method="post" action="{{ url_for('add_movement', client_id=client.id) }}" class="card card-body mb-4">
   <div class="row g-3 align-items-end">
@@ -34,7 +34,22 @@
   </div>
 </form>
 
-<h2 class="h6">Historique des mouvements</h2>
+{# Calcul stock côté template pour affichage rapide #}
+{% set client_stock = 0 %}
+{% for m in movements %}
+  {% if m.type == 'livraison' %}
+    {% set client_stock = client_stock + m.quantity %}
+  {% else %}
+    {% set client_stock = client_stock - m.quantity %}
+  {% endif %}
+{% endfor %}
+
+<div class="alert alert-light d-flex justify-content-between align-items-center">
+  <div><strong>Stock actuel</strong></div>
+  <div class="display-6 m-0">{{ client_stock }}</div>
+</div>
+
+<h2 class="h6 mt-4">Historique des mouvements</h2>
 <div class="table-responsive">
   <table class="table table-sm align-middle">
     <thead>
@@ -75,11 +90,11 @@
   </table>
 </div>
 
-<div class="mt-3">
+<div class="mt-3 d-flex gap-2">
   <form method="post" action="{{ url_for('delete_client', client_id=client.id) }}"
         onsubmit="return confirm('Supprimer définitivement {{ client.name }} et tous ses mouvements ?');">
     <button class="btn btn-outline-danger">Supprimer ce client</button>
-    <a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Retour</a>
   </form>
+  <a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Retour</a>
 </div>
 {% endblock %}
