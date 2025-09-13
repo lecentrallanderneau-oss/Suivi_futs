@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from urllib.parse import urlparse
 
-from flask import Flask, render_template, redirect, url_for, abort
+from flask import Flask, render_template, abort
 from flask_sqlalchemy import SQLAlchemy
 
 # -----------------------------------------------------------------------------
@@ -15,33 +15,39 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
 
 # -----------------------------------------------------------------------------
-# Base de données (Render: DATABASE_URL; local: sqlite)
+# Base de données
+# - En prod (Render) : DATABASE_URL -> forcer driver psycopg3
+# - En local : SQLite
 # -----------------------------------------------------------------------------
 db_url = os.environ.get("DATABASE_URL")
+
 if db_url:
-    # Render fournit souvent "postgres://", SQLAlchemy attend "postgresql://"
+    # Render peut donner "postgres://..." -> standardiser
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+    # Si l’URL est "postgresql://..." (driver implicite psycopg2),
+    # on force psycopg3 avec "postgresql+psycopg://..."
+    if db_url.startswith("postgresql://"):
+        db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 else:
+    # fallback local
     db_url = "sqlite:///local.db"
 
 app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+# Option utile avec certains reverse proxies / connexions dormantes
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 
 db = SQLAlchemy(app)
 
 # -----------------------------------------------------------------------------
-# Modèles (minimaux, compatibles "structure d'abord")
-# !!! Ne déclenche aucune création/altération de colonnes automatiquement.
+# Modèles minimalistes (structure stable)
 # -----------------------------------------------------------------------------
 class Client(db.Model):
     __tablename__ = "clients"
-
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String, nullable=False)
-
-    # Ajoute ce que tu as déjà dans ta base si besoin,
-    # mais on garde ici le strict minimum pour la stabilité.
 
 
 # -----------------------------------------------------------------------------
@@ -49,16 +55,13 @@ class Client(db.Model):
 # -----------------------------------------------------------------------------
 @app.template_filter("eur")
 def eur_filter(cents: int | None) -> str:
-    """
-    Formate des centimes en '12,34 €'. Si None, retourne '0,00 €'.
-    """
+    """Formate des centimes en '12,34 €'."""
     value = (cents or 0) / 100.0
-    # Remplacer le point par une virgule pour le format FR
     return f"{value:,.2f} €".replace(",", "X").replace(".", ",").replace("X", " ")
 
 @app.context_processor
 def inject_now():
-    # Très important : renvoyer la **valeur** datetime, pas la fonction
+    # IMPORTANT : renvoyer un objet datetime, pas la fonction
     return {"now": datetime.utcnow()}
 
 
@@ -67,7 +70,6 @@ def inject_now():
 # -----------------------------------------------------------------------------
 @app.route("/")
 def index():
-    # Tableau de bord très simple : liste des clients
     clients = Client.query.order_by(Client.name.asc()).all()
     return render_template("index.html", clients=clients)
 
@@ -81,19 +83,15 @@ def client_detail(client_id: int):
     client = Client.query.get(client_id)
     if not client:
         abort(404)
-    # Page de détail minimaliste pour ne pas casser la nav
     return render_template("client_detail.html", client=client)
 
 
 # -----------------------------------------------------------------------------
-# Lancement local
+# Lancement local uniquement (création SQLite)
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # En local seulement : créer le fichier sqlite s'il n'existe pas,
-    # sans forcer de migrations sur Postgres en prod.
     parsed = urlparse(app.config["SQLALCHEMY_DATABASE_URI"])
     if parsed.scheme.startswith("sqlite"):
         with app.app_context():
             db.create_all()
-
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
