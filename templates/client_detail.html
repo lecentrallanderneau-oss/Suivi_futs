@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h4">{{ c.name }}{% if c.city %} – <span class="text-muted">{{ c.city }}</span>{% endif %}</h1>
+  <a class="btn btn-primary" href="{{ url_for('movement_new', client_id=c.id) }}">➕ Nouvelle saisie</a>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-4">
+    <div class="card p-3">
+      <div class="text-muted">Fûts en cours</div>
+      <div class="fs-3">{{ current_kegs }}</div>
+      <div class="text-muted small">Consignes : {{ (current_kegs * 3000)|eur }}</div>
+    </div>
+  </div>
+  <div class="col-md-8">
+    <div class="card p-3">
+      <div class="text-muted mb-1">Matériel en prêt</div>
+      {% if equip_summary %}
+        <ul class="mb-0">
+        {% for name, qty in equip_summary.items() %}
+          <li>{{ name }} : {{ qty }}</li>
+        {% endfor %}
+        </ul>
+      {% else %}
+        <div class="text-muted">Aucun.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header">Historique fûts</div>
+      <div class="list-group list-group-flush">
+        {% for m in keg_moves %}
+          <div class="list-group-item d-flex justify-content-between align-items-center">
+            <div>
+              <div class="small text-muted">{{ m.date.isoformat() }}</div>
+              <div>{{ m.product_name or 'Boisson' }} — +{{ m.delivered_full }} / -{{ m.picked_empty + m.picked_defective }} (Δ {{ m.delta_kegs }})</div>
+            </div>
+            <form method="post" action="{{ url_for('keg_delete', move_id=m.id) }}" onsubmit="return confirm('Supprimer cette ligne ?')">
+              <button class="btn btn-sm btn-outline-danger">Supprimer</button>
+            </form>
+          </div>
+        {% else %}
+          <div class="list-group-item text-muted">Aucune saisie pour l’instant.</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header">Historique matériel</div>
+      <div class="list-group list-group-flush">
+        {% for m in equip_moves %}
+          <div class="list-group-item d-flex justify-content-between align-items-center">
+            <div>
+              <div class="small text-muted">{{ m.date.isoformat() }}</div>
+              <div>{{ m.equipment_name }} — sortis {{ m.qty_out }} / rentrés {{ m.qty_in }} (Δ {{ m.delta_qty }})</div>
+            </div>
+            <form method="post" action="{{ url_for('equip_delete', move_id=m.id) }}" onsubmit="return confirm('Supprimer cette ligne ?')">
+              <button class="btn btn-sm btn-outline-danger">Supprimer</button>
+            </form>
+          </div>
+        {% else %}
+          <div class="list-group-item text-muted">Aucun mouvement matériel.</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

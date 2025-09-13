@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h4">Tableau de bord</h1>
+  <a class="btn btn-primary" href="{{ url_for('clients') }}">Gérer les clients</a>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-4">
+    <div class="card p-3">
+      <div class="text-muted">Fûts chez les clients</div>
+      <div class="fs-3">{{ totals.kegs or 0 }}</div>
+      <div class="text-muted small">Consignes théoriques : {{ totals.deposit_cents|eur }}</div>
+    </div>
+  </div>
+  <div class="col-md-8">
+    <div class="card p-3">
+      <div class="text-muted mb-1">Matériel en prêt (total)</div>
+      {% if totals.equip %}
+        <ul class="mb-0">
+        {% for name, qty in totals.equip.items() %}
+          <li>{{ name }} : {{ qty }}</li>
+        {% endfor %}
+        </ul>
+      {% else %}
+        <div class="text-muted">Aucun matériel en prêt.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Clients</div>
+  <div class="list-group list-group-flush">
+    {% for c in cards %}
+      <a class="list-group-item list-group-item-action d-flex justify-content-between align-items-center"
+         href="{{ url_for('client_detail', client_id=c.id) }}">
+        <span>{{ c.name }}{% if c.city %} – <span class="text-muted">{{ c.city }}</span>{% endif %}</span>
+        <span class="badge bg-primary rounded-pill">{{ c.current_kegs() }} fût(s)</span>
+      </a>
+    {% else %}
+      <div class="list-group-item text-muted">Aucun client. Ajoutez-en un dans l'onglet "Clients".</div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

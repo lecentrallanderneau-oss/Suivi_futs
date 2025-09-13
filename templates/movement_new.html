@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="h4 mb-3">Nouvelle saisie</h1>
+
+<form method="post" action="{{ url_for('movement_new_post') }}" class="card p-3" style="max-width:800px">
+  <input type="hidden" name="client_id" value="{{ (c.id if c) or '' }}">
+  <div class="row g-3">
+    <div class="col-md-6">
+      <label class="form-label">Client</label>
+      {% if c %}
+        <input class="form-control" value="{{ c.name }}" disabled>
+      {% else %}
+        <select class="form-select" name="client_id" required>
+          {% for x in (clients or []) %}
+          <option value="{{ x.id }}">{{ x.name }}</option>
+          {% endfor %}
+        </select>
+      {% endif %}
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Date</label>
+      <input class="form-control" type="date" name="date" value="{{ (now().date().isoformat()) }}">
+    </div>
+
+    <div class="col-12"><hr><strong>Fûts / Boisson</strong></div>
+    <div class="col-md-6">
+      <label class="form-label">Référence (libre)</label>
+      <input class="form-control" name="product_name" placeholder="Ex: IPA 30L">
+    </div>
+    <div class="col-md-2">
+      <label class="form-label">Livrés (pleins)</label>
+      <input class="form-control" type="number" name="delivered_full" value="0" min="0">
+    </div>
+    <div class="col-md-2">
+      <label class="form-label">Repris (vides)</label>
+      <input class="form-control" type="number" name="picked_empty" value="0" min="0">
+    </div>
+    <div class="col-md-2">
+      <label class="form-label">Défectueux</label>
+      <input class="form-control" type="number" name="picked_defective" value="0" min="0">
+    </div>
+
+    <div class="col-12"><hr><strong>Matériel (optionnel)</strong></div>
+    <div class="col-md-6">
+      <label class="form-label">Matériel</label>
+      <input class="form-control" name="equipment_name" placeholder="Ex: Tireuse 2 becs">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">Sortis</label>
+      <input class="form-control" type="number" name="equip_out" value="0" min="0">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">Rentrés</label>
+      <input class="form-control" type="number" name="equip_in" value="0" min="0">
+    </div>
+  </div>
+
+  <div class="mt-3 d-flex gap-2">
+    <a class="btn btn-outline-secondary" href="{{ url_for('client_detail', client_id=(c.id if c else 0)) }}">Annuler</a>
+    <button class="btn btn-primary">Enregistrer</button>
+  </div>
+</form>
+{% endblock %}
