@@ -14,9 +14,7 @@ from sqlalchemy import text
 def _make_db_uri() -> str:
     uri = os.getenv("DATABASE_URL", "").strip()
     if not uri:
-        # pour dev local éventuel
         return "sqlite:///local.db"
-    # Render fournit souvent postgres:// -> il faut postgresql+psycopg://
     if uri.startswith("postgres://"):
         uri = uri.replace("postgres://", "postgresql+psycopg://", 1)
     elif uri.startswith("postgresql://"):
@@ -27,10 +25,10 @@ app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = _make_db_uri()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-db = SQLAlchemy(app)  # <<<<< UNE SEULE instance, directement liée à app
+db = SQLAlchemy(app)  # << une seule instance liée à app
 
 # ------------------------------------------------------------------------------
-# Modèles (simples, tout-en-un)
+# Modèles simples
 # ------------------------------------------------------------------------------
 class Client(db.Model):
     __tablename__ = "clients"
@@ -44,55 +42,44 @@ class KegMove(db.Model):
     client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False, index=True)
     qty_out = db.Column(db.Integer, nullable=False, default=0)     # fûts livrés
     qty_in = db.Column(db.Integer, nullable=False, default=0)      # fûts repris
-    qty_defect = db.Column(db.Integer, nullable=False, default=0)  # fûts défectueux repris (déconsigne)
+    qty_defect = db.Column(db.Integer, nullable=False, default=0)  # fûts défectueux repris
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 class EquipMove(db.Model):
     __tablename__ = "equip_moves"
     id = db.Column(db.Integer, primary_key=True)
     client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False, index=True)
-    equip_name = db.Column(db.String(128), nullable=False)         # ex: Tireuse, CO2, Barnum...
+    equip_name = db.Column(db.String(128), nullable=False)
     qty_out = db.Column(db.Integer, nullable=False, default=0)     # prêt
     qty_in = db.Column(db.Integer, nullable=False, default=0)      # retour
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 # ------------------------------------------------------------------------------
-# Auto-migration minimale (création des tables/colonnes manquantes)
+# Auto-migration minimale
 # ------------------------------------------------------------------------------
 def ensure_schema():
     with app.app_context():
-        # crée les tables manquantes
         db.create_all()
-
-        # Ajout sécurisé de colonnes si besoin (Postgres accepte IF NOT EXISTS)
-        dialect_name = db.session.bind.dialect.name
-        if dialect_name == "postgresql":
+        if db.session.bind.dialect.name == "postgresql":
             ddl = [
-                # clients.note
                 "ALTER TABLE clients ADD COLUMN IF NOT EXISTS note TEXT",
-                # keg_moves
                 "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_out INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_in INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS qty_defect INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()",
-                # equip_moves
+                "ALTER TABLE keg_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
                 "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS equip_name VARCHAR(128)",
                 "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS qty_out INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS qty_in INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()",
+                "ALTER TABLE equip_moves ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
             ]
             for stmt in ddl:
                 db.session.execute(text(stmt))
             db.session.commit()
-        else:
-            # sqlite : create_all suffit ; pour des colonnes manquantes il faudrait migrer, on reste simple.
-            pass
 
-# Exécuter l’auto-migration une fois au démarrage
 ensure_schema()
 
 # ------------------------------------------------------------------------------
-# Filtre Jinja € (eur)
+# Filtre Jinja €
 # ------------------------------------------------------------------------------
 @app.template_filter("eur")
 def eur(value):
@@ -100,34 +87,32 @@ def eur(value):
         v = Decimal(value)
     except Exception:
         v = Decimal(0)
-    # format fr: 1 234,56 €
     s = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", " ")
     return f"{s} €"
 
 # ------------------------------------------------------------------------------
-# Helpers de calcul
+# Helpers
 # ------------------------------------------------------------------------------
 CONSigne_PAR_FUT = Decimal("30")
 
 def client_keg_summary(client_id: int) -> dict:
-    """Retourne les totaux fûts pour un client."""
     row = db.session.execute(
         text(
             """
             SELECT
-              COALESCE(SUM(qty_out), 0) AS out,
-              COALESCE(SUM(qty_in), 0) AS in,
-              COALESCE(SUM(qty_defect), 0) AS defect
+              COALESCE(SUM(qty_out), 0)  AS out_sum,
+              COALESCE(SUM(qty_in), 0)   AS in_sum,
+              COALESCE(SUM(qty_defect), 0) AS defect_sum
             FROM keg_moves
             WHERE client_id = :cid
             """
         ),
         {"cid": client_id},
     ).one()
-
-    qty_out = int(row.out or 0)
-    qty_in = int(row.in or 0)
-    qty_def = int(row.defect or 0)
+    m = row._mapping  # éviter row.in (mot-clé)
+    qty_out = int(m["out_sum"] or 0)
+    qty_in = int(m["in_sum"] or 0)
+    qty_def = int(m["defect_sum"] or 0)
     in_play = qty_out - qty_in - qty_def
     consignes = CONSigne_PAR_FUT * Decimal(max(in_play, 0))
     return {"out": qty_out, "in": qty_in, "defect": qty_def, "in_play": in_play, "consignes": consignes}
@@ -136,7 +121,8 @@ def client_equip_summary(client_id: int) -> dict[str, int]:
     rows = db.session.execute(
         text(
             """
-            SELECT equip_name, COALESCE(SUM(qty_out),0) - COALESCE(SUM(qty_in),0) AS on_loan
+            SELECT equip_name,
+                   COALESCE(SUM(qty_out),0) - COALESCE(SUM(qty_in),0) AS on_loan
             FROM equip_moves
             WHERE client_id = :cid
             GROUP BY equip_name
@@ -146,7 +132,7 @@ def client_equip_summary(client_id: int) -> dict[str, int]:
         ),
         {"cid": client_id},
     ).all()
-    return {r.equip_name: int(r.on_loan or 0) for r in rows}
+    return {r._mapping["equip_name"]: int(r._mapping["on_loan"] or 0) for r in rows}
 
 # ------------------------------------------------------------------------------
 # Routes
@@ -172,8 +158,6 @@ def index():
                 "equip": e,
             }
         )
-
-    # essaie templates/index.html si présent, sinon fallback inline
     try:
         return render_template("index.html", cards=cards, total_kegs=total_kegs, total_consignes=total_consignes)
     except Exception:
@@ -213,7 +197,6 @@ def new_client():
         note = (request.form.get("note") or "").strip()
         if not name:
             abort(400, "Nom requis")
-        # upsert simple par nom
         existing = Client.query.filter_by(name=name).first()
         if existing:
             existing.note = note
@@ -223,7 +206,6 @@ def new_client():
         db.session.add(c)
         db.session.commit()
         return redirect(url_for("client_detail", client_id=c.id))
-    # GET
     try:
         return render_template("client_new.html")
     except Exception:
@@ -243,18 +225,13 @@ def client_detail(client_id: int):
     c = db.session.get(Client, client_id) or abort(404)
     k = client_keg_summary(client_id)
     e = client_equip_summary(client_id)
-
     keg_rows = KegMove.query.filter_by(client_id=client_id).order_by(KegMove.created_at.desc()).limit(100).all()
     equip_rows = EquipMove.query.filter_by(client_id=client_id).order_by(EquipMove.created_at.desc()).limit(100).all()
-
     try:
         return render_template(
             "client_detail.html",
-            c=c,
-            k=k,
-            e=e,
-            keg_rows=keg_rows,
-            equip_rows=equip_rows,
+            c=c, k=k, e=e,
+            keg_rows=keg_rows, equip_rows=equip_rows,
             CONSIGNE=float(CONSigne_PAR_FUT),
         )
     except Exception:
@@ -289,18 +266,15 @@ def client_detail(client_id: int):
               {% endfor %}
             </ul>
             """,
-            c=c,
-            k=k,
-            e=e,
-            keg_rows=keg_rows,
-            equip_rows=equip_rows,
+            c=c, k=k, e=e,
+            keg_rows=keg_rows, equip_rows=equip_rows,
             CONSIGNE=float(CONSigne_PAR_FUT),
         )
 
 @app.route("/client/<int:client_id>/keg/new", methods=["POST"])
 def add_keg_move(client_id: int):
     c = db.session.get(Client, client_id) or abort(404)
-    def _to_int(name): 
+    def _to_int(name):
         try: return int(request.form.get(name, "0") or 0)
         except: return 0
     m = KegMove(
@@ -318,8 +292,8 @@ def add_keg_move(client_id: int):
 def add_equip_move(client_id: int):
     c = db.session.get(Client, client_id) or abort(404)
     name = (request.form.get("equip_name") or "").strip() or "Matériel"
-    def _to_int(name): 
-        try: return int(request.form.get(name, "0") or 0)
+    def _to_int(n):
+        try: return int(request.form.get(n, "0") or 0)
         except: return 0
     m = EquipMove(
         client_id=c.id,
@@ -336,5 +310,4 @@ def add_equip_move(client_id: int):
 # Entrée
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Débogage local : flask builtin server
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
